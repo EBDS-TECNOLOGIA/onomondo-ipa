@@ -101,20 +101,21 @@ build was run end-to-end with `android-ndk-r27d`:
   `configure`/`Configure` so only `perl` + `make` are required.) This is now
   captured as a reusable, per-ABI helper: `scripts/build-android-deps.sh`.
 - `cmake -DCMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/android.toolchain.cmake
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26
+  -DANDROID_ABI=<abi> -DANDROID_PLATFORM=android-26
   -DCMAKE_FIND_ROOT_PATH=<prefix> -DOPENSSL_ROOT_DIR=<prefix>` then
-  `cmake --build` produced **`libipacore.so`** (AArch64 `DYN`, SONAME
-  `libipacore.so`).
-- Verified: `NEEDED` is only Bionic (`libm`/`libdl`/`libc`) — OpenSSL and curl
-  are statically embedded (`SSL_connect`, `EC_KEY_new`, `curl_easy_init`
-  present); the public `ipad.h` API is exported (`ipa_init`, `ipa_poll`,
-  `ipa_execute_fallback`, `ipa_get_connectivity_params`,
+  `cmake --build` produced **`libipacore.so`** for **both target ABIs**:
+  `arm64-v8a` (AArch64 `DYN`, ~11 MB) and `armeabi-v7a` (ARM/ELF32 `DYN`,
+  ~9 MB), each with SONAME `libipacore.so`.
+- Verified on both: `NEEDED` is only Bionic (`libm`/`libdl`/`libc`) — OpenSSL
+  and curl are statically embedded (`SSL_connect`, `EC_KEY_new`,
+  `curl_easy_init` present); the public `ipad.h` API is exported (`ipa_init`,
+  `ipa_poll`, `ipa_execute_fallback`, `ipa_get_connectivity_params`,
   `ipa_set_default_dp_addr`, `ipa_scard_init`, …). This is the Phase-0
-  deliverable: core + net + crypto linked into a `.so`, no eUICC yet.
+  deliverable: core + net + crypto linked into a `.so` for both ABIs, no eUICC
+  yet.
 
-Remaining: the same dependency + link pass for `armeabi-v7a` (the C99 core
-already cross-compiles clean for it; only the OpenSSL/curl rebuild for that ABI
-is left), and later jansson (Phase 2) via `CMAKE_FIND_ROOT_PATH`.
+Remaining for a fuller build later (not Phase 0): jansson (Phase 2) supplied the
+same way via `CMAKE_FIND_ROOT_PATH`.
 
 - Use the NDK's CMake toolchain file; parameterize `ABI` / `minSdk` (target `arm64-v8a` + `armeabi-v7a`, minSdk >= 26 for OMAPI / stable telephony APDU APIs).
 - Provide Android builds of dependencies: BoringSSL (satisfies the `CURLOPT_SSL_CTX_FUNCTION` requirement — OpenSSL-family, unlike GnuTLS), libcurl, jansson. Fetch via an `ExternalProject` superbuild or prebuilts.
