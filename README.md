@@ -94,6 +94,36 @@ non-standard API. However, the function is available on GNU LINUX and FreeBSD (s
 * `-DM32`
 use this option to compile onomondo-ipa for 32-BIT x86 architectures,
 see also GCC manual, section 3.19.54 x86 Options.
+* `-DIPA_TARGET_ANDROID`
+build the portable core as a shared library (`libipacore.so`) for Android
+instead of the Linux PC/SC command-line executable. This is auto-enabled when
+building with the NDK CMake toolchain. See below.
+
+#### Android build (in progress)
+
+An Android port is underway — see [ANDROID_PORT_PLAN.md](ANDROID_PORT_PLAN.md).
+The build scaffolding (Phase 0) is in place: with the NDK CMake toolchain the
+project builds `libipacore.so` (the C99 core + net + crypto) instead of the
+`ipa` executable, drops the `pcsclite` dependency, and uses an Android eUICC
+backend (`scard_android.c`). OpenSSL and libcurl for the target ABI must be
+supplied to CMake via `CMAKE_FIND_ROOT_PATH`; `scripts/build-android-deps.sh`
+cross-builds them (static) from the upstream release tarballs:
+
+```
+export NDK_ROOT=$HOME/android-ndk-r27d
+scripts/build-android-deps.sh arm64-v8a $PWD/build-android-deps/arm64-v8a
+
+cmake -S . -B build-android \
+  -DCMAKE_TOOLCHAIN_FILE=$NDK_ROOT/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+  -DCMAKE_FIND_ROOT_PATH=$PWD/build-android-deps/arm64-v8a \
+  -DOPENSSL_ROOT_DIR=$PWD/build-android-deps/arm64-v8a
+cmake --build build-android      # -> build-android/src/ipa/libipacore.so
+```
+
+Note: `asn1c` must be installed on the build **host** (it is a code generator);
+the eUICC backend is a stub until Phase 1 lands the JNI transport, so the
+resulting `.so` links but does not yet talk to a real eUICC.
 
 
 Usage

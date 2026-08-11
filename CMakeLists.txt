@@ -10,6 +10,48 @@ option(ASN_EMIT_DEBUG "Enable built-in debug output of asn1c" OFF)
 option(MEM_EMIT_DEBUG "Enable debug output for heap memory usage" OFF)
 option(M32 "Compile for 32 bit mode" OFF)
 
+# ---------------------------------------------------------------------------
+# Android target (ANDROID_PORT_PLAN.md, Phase 0).
+#
+# The NDK ships its own CMake toolchain file; a cross build is invoked as
+#   cmake -S . -B build-android \
+#     -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+#     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26
+# That toolchain sets CMAKE_SYSTEM_NAME=Android (and provides ANDROID_ABI /
+# the API level), so we default IPA_TARGET_ANDROID ON whenever it is in use.
+# It can also be forced explicitly.  When set, the build produces the portable
+# core as libipacore.so (see src/ipa/CMakeLists.txt) instead of the Linux
+# PC/SC command-line executable.
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR ANDROID)
+  option(IPA_TARGET_ANDROID "Build the portable core as libipacore.so for Android" ON)
+else()
+  option(IPA_TARGET_ANDROID "Build the portable core as libipacore.so for Android" OFF)
+endif()
+
+if(IPA_TARGET_ANDROID)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
+    message(FATAL_ERROR
+      "IPA_TARGET_ANDROID=ON requires the NDK toolchain "
+      "(-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake).")
+  endif()
+  # OMAPI and the stable logical-channel APDU APIs the scard backend targets
+  # need minSdk >= 26 (ANDROID_PLATFORM=android-26 ...).  The NDK toolchain
+  # reports the resolved API level in ANDROID_PLATFORM_LEVEL; CMAKE_SYSTEM_VERSION
+  # is unreliable here (it can read as 1 even with -DANDROID_PLATFORM=android-26).
+  if(DEFINED ANDROID_PLATFORM_LEVEL)
+    set(_ipa_api_level ${ANDROID_PLATFORM_LEVEL})
+  else()
+    set(_ipa_api_level ${CMAKE_SYSTEM_VERSION})
+  endif()
+  if(_ipa_api_level LESS 26)
+    message(WARNING
+      "IPA_TARGET_ANDROID: API level ${_ipa_api_level} < 26; the eUICC "
+      "transport (Phase 1) needs minSdk >= 26.")
+  endif()
+  message(STATUS
+    "IPA_TARGET_ANDROID: building libipacore.so (ABI '${ANDROID_ABI}', API ${_ipa_api_level})")
+endif()
+
 if (ENABLE_SANITIZE)
   add_compile_options(-fsanitize=address)
   add_link_options(-fsanitize=address)
@@ -49,7 +91,10 @@ set(_asn_src_dir   "${CMAKE_CURRENT_SOURCE_DIR}/asn1")
 set(_gen_script    "${_asn_src_dir}/gen_libasn.sh")
 file(GLOB _asn_files "${_asn_src_dir}/*.asn")
 
-find_program(ASN1C_EXECUTABLE asn1c)
+# asn1c is a *host* code generator (it emits portable C compiled for the target
+# later), so under a cross toolchain it must be found on the host, not inside
+# the NDK sysroot -- hence NO_CMAKE_FIND_ROOT_PATH.  Harmless for native builds.
+find_program(ASN1C_EXECUTABLE asn1c NO_CMAKE_FIND_ROOT_PATH)
 if(NOT ASN1C_EXECUTABLE)
   message(FATAL_ERROR
     "asn1c not found -- install it (e.g. 'apt-get install asn1c') and re-run cmake.")
@@ -117,5 +162,9 @@ endif()
 
 add_subdirectory(src)
 
-include(CTest)
-add_subdirectory(tests)
+# The test suite links the core and runs under ctest on the build host; a
+# cross-compiled (Android) build cannot execute it here, so skip it.
+if(NOT IPA_TARGET_ANDROID)
+  include(CTest)
+  add_subdirectory(tests)
+endif()
