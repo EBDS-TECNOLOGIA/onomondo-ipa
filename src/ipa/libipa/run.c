@@ -25,6 +25,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <onomondo/ipa/mem.h>
 #include <onomondo/ipa/utils.h>
 #include <onomondo/ipa/log.h>
@@ -36,6 +37,13 @@
 /* Set from ipa_run_stop(), which may run in a signal handler or in another
  * thread, hence volatile sig_atomic_t rather than bool. */
 static volatile sig_atomic_t run_stop;
+
+/* One run at a time.  An Android foreground service that gets restarted, or a
+ * daemon started twice, would otherwise have two poll loops sharing run_stop
+ * and the same nvstate file, with the second overwriting the first's state on
+ * exit. */
+static pthread_mutex_t run_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool run_active;
 
 void ipa_run_stop(void)
 {
@@ -110,6 +118,15 @@ int ipa_run(struct ipa_run_config *rcfg)
 
 	if (!rcfg)
 		return -EINVAL;
+
+	pthread_mutex_lock(&run_lock);
+	if (run_active) {
+		pthread_mutex_unlock(&run_lock);
+		IPA_LOGP(SMAIN, LERROR, "IPAd is already running; refusing to start a second poll loop\n");
+		return -EBUSY;
+	}
+	run_active = true;
+	pthread_mutex_unlock(&run_lock);
 
 	run_stop = 0;
 
@@ -209,6 +226,11 @@ leave:
 close_log:
 	if (log_file_open)
 		ipa_log_file_sink_free();
+
+	pthread_mutex_lock(&run_lock);
+	run_active = false;
+	pthread_mutex_unlock(&run_lock);
+
 	return rc;
 }
 

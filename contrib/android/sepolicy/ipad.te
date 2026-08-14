@@ -1,0 +1,38 @@
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# SELinux policy for the native IPAd daemon (ANDROID_PORT_PLAN.md, Phase 4).
+#
+# Drop into your device's sepolicy directory (BOARD_SEPOLICY_DIRS /
+# BOARD_VENDOR_SEPOLICY_DIRS) together with file_contexts.  This grants the
+# daemon its own domain, its state directory and outbound network access.
+#
+# NOTE: nothing here grants eUICC access.  The telephony transport is reached
+# from the app, not from this domain -- see contrib/android/README.md.  An
+# integrator wiring a vendor APDU channel or an OMAPI helper into this daemon
+# must add the corresponding allow rules themselves.
+
+type ipad, domain;
+type ipad_exec, exec_type, file_type, system_file_type;
+type ipad_data_file, file_type, data_file_type, core_data_file_type;
+
+# init launches it and it never forks
+init_daemon_domain(ipad)
+
+# /data/misc/ipa: configuration, nvstate and the rotating log file
+allow ipad ipad_data_file:dir rw_dir_perms;
+allow ipad ipad_data_file:file create_file_perms;
+
+# Reaching the eIM over HTTPS
+net_domain(ipad)
+
+# Resolving the eIM's hostname
+allow ipad system_dnsmasq_socket:sock_file write;
+
+# Reading the CA bundle referenced by "eim_cabundle" in config.json
+allow ipad system_file:dir search;
+
+# The daemon logs through its own rotating file sink, so it needs no logd
+# access at all; drop the following line if you set "log.path" and want the
+# stderr fallback to reach logcat anyway.
+# allow ipad logdw_socket:sock_file write;

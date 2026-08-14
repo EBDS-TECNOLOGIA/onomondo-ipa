@@ -119,6 +119,19 @@ static void nvstate_deserialize(struct ipa_nvstate *nvstate, struct ipa_buf *nvs
 		return;
 	}
 
+	/* A file too short to even hold the fixed part cannot be deserialized:
+	 * the memcpy below would read past the buffer and the length arithmetic
+	 * that follows would underflow.  This is what a power cut in the middle
+	 * of save_nvstate_to_file() leaves behind, so treat it the same as a
+	 * missing file and start from a fresh state. */
+	if (nvstate_bin->len < sizeof(*nvstate)) {
+		IPA_LOGP(SIPA, LERROR,
+			 "non volatile state is truncated (%zu bytes, expected at least %zu) -- starting over\n",
+			 nvstate_bin->len, sizeof(*nvstate));
+		nvstate_reset(nvstate);
+		return;
+	}
+
 	/* deserialize statically allocated struct members and check version */
 	memcpy((uint8_t *) nvstate, nvstate_bin->data, sizeof(*nvstate));
 	nvstate_data = nvstate_bin->data + sizeof(*nvstate);

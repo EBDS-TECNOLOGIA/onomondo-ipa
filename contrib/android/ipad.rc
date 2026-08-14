@@ -1,0 +1,34 @@
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# init service definition for the native IPAd daemon.
+# See ANDROID_PORT_PLAN.md (Phase 4) and contrib/android/README.md.
+#
+# Install to /vendor/etc/init/ipad.rc (or /system/etc/init/ipad.rc on a
+# system-image build).  READ contrib/android/README.md FIRST: this daemon
+# cannot drive the eUICC over Android telephony -- that path needs the app.
+
+service ipad /system/bin/ipad -c /data/misc/ipa/config.json -i 3600
+    class late_start
+
+    # "system" gets the daemon read/write access to /data/misc/ipa; "inet" is
+    # required to open the TCP sockets libcurl uses to reach the eIM.
+    user system
+    group system inet
+
+    seclabel u:r:ipad:s0
+
+    # Do not respawn on exit: a failing poll cycle usually means the eIM or the
+    # network is unavailable, and init's restart backoff would hammer both.  The
+    # -i interval above already provides the retry cadence.
+    oneshot
+
+    # Started by the trigger below rather than at class start, so the daemon
+    # does not race /data being mounted and decrypted.
+    disabled
+
+on post-fs-data
+    mkdir /data/misc/ipa 0770 system system
+
+on property:sys.boot_completed=1
+    start ipad

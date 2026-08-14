@@ -154,6 +154,37 @@ registration state, eCall triggers, ...).
 
 (use option -h to query the full list of parameters)
 
+### Configuration from a JSON file
+
+Instead of command-line flags, onomondo-ipa can take its whole configuration
+from a JSON file with `-j`:
+
+```
+./src/ipa/ipa -j /etc/ipa/config.json
+```
+
+`-j` takes over completely — the other flags are ignored — so there is never a
+second source of truth for the same setting. There is one JSON key per flag;
+see [`contrib/ipa-config.example.json`](contrib/ipa-config.example.json) for an
+annotated example and [ANDROID_PORT_PLAN.md](ANDROID_PORT_PLAN.md) for the full
+mapping. Keys starting with `_` are ignored, so the file can carry `"_comment"`
+annotations. Unknown keys, wrong types and out-of-range values are refused with
+a log line naming the key rather than silently falling back to a default.
+
+This is the same entry point (`ipa_run_from_config()`) the Android daemon and
+the APK use, since neither has a command line.
+
+Setting `log.path` switches the log from stderr to a rotating file, capped at
+`log.max_size_bytes` per file and `log.max_files` files in total (the current
+file included), so it cannot fill a device's flash:
+
+```json
+"log": { "path": "/data/ipa/ipa.log", "max_size_bytes": 262144, "max_files": 5 }
+```
+
+Set `max_size_bytes` to 0 to disable rotation and let something else — logrotate,
+say — own the policy. Without a `log` block the log goes to stderr as before.
+
 ### Initial Setup
 
 During the first run, onomondo-ipa will create an `nvstate.bin` file in its working directory. 
@@ -192,6 +223,8 @@ License
 Copyright (c) 2025 Onomondo ApS & sysmocom - s.f.m.c. GmbH.
 
 Migration to SGP.32 v1.2 is supported by Iapyx Informática Ltda. and an independent startup that will be named here once it launches publicly.
+
+The Android port is supported by EBDS Tecnologia Ltda.
 
 Many thanks also to [Michael O'Connor](https://www.linkedin.com/in/mikeoconnorirl/) from [DomainsIntel](https://domainsintel.com/) for the code conversion contained in the first commit (1b1756a) to the `sgp.32-v1.2` branch.
 

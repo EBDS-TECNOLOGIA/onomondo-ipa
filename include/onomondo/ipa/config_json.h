@@ -123,6 +123,9 @@ void ipa_run_config_free(struct ipa_run_config *rcfg);
  *  The context keeps a pointer to rcfg->cfg (it does not copy it), so rcfg
  *  must stay alive for the whole call -- and cfg.tac may be updated in place
  *  while it runs, as struct ipa_config documents.
+ *  Only one run may be active at a time; a second concurrent call returns
+ *  -EBUSY rather than sharing the stop flag and the nvstate file with the
+ *  first.
  *  \param[in] rcfg run configuration (not freed).
  *  \returns 0 on success, negative on error. */
 int ipa_run(struct ipa_run_config *rcfg);

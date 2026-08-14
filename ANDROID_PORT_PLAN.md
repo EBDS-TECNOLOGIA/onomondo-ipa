@@ -342,9 +342,77 @@ not rotate", for when logrotate or the platform owns the policy.
 
 ## Phase 4 — Daemon packaging
 
-- Build `libipacore.so` + a tiny native `main` (`ipad_android.c`) -> `ipad` executable, launched as an init `.rc` service (system image) or an app-owned foreground service's child. Runs `ipa_run_from_config("/data/.../config.json")` and installs the rotating-file sink.
-- Signal handling: keep the `SIGUSR1` -> `running=false` graceful-stop from `main.c`.
-- SELinux: a system daemon needs a policy domain allowing telephony access — flag for the AOSP/OEM integrator (sepolicy `.te` additions).
+**Status: done (2026-08-14),** with one correction to the plan's premise. What
+landed:
+
+- `src/ipa/ipad_android.c` → the **`ipad`** binary (Android CMake target,
+  alongside `libipacore.so`). A thin `main()` around `ipa_run_from_config()`:
+  `-c PATH` for the config, `-i SECONDS` to repeat, `SIGTERM`/`SIGINT`/`SIGUSR1`
+  for a graceful stop, `SIGPIPE` ignored so a dead eIM connection cannot kill
+  the daemon.
+- `src/ipa/run_jni.c` → `NativeBridge.nativeRun(String)` / `nativeStop()`, the
+  entry point for the **app-hosted** daemon.
+- `contrib/android/ipad.rc` — init service definition.
+- `contrib/android/sepolicy/{ipad.te,file_contexts}` — its own SELinux domain,
+  state directory and network access.
+- `contrib/android/README.md` — deployment guide for both shapes.
+- `tests/run_guard/` — the single-run guard, tested deterministically.
+
+### Correction: a native init daemon cannot use the telephony transport
+
+The plan offered "an init `.rc` service (system image) **or** an app-owned
+foreground service's child" as equivalent options. They are not. Phase 1
+established that reaching the ISD-R through `TelephonyManager` requires the
+calling process to hold `MODIFY_PHONE_STATE` **and** to be the device's LPA —
+both properties of an Android *package* — and the transport bridges up into a
+Kotlin `EuiccChannel` over JNI. A native process launched by `init` has no JVM
+and no package identity, so it cannot satisfy either.
+
+So the **app-hosted foreground service is the supported shape** for the
+telephony path, and `ipad` is for integrators supplying their own transport (a
+vendor APDU channel, an OMAPI helper). Both are built and documented; the
+README leads with this distinction so nobody deploys the wrong one.
+
+### Scheduling: the core is run-to-completion, not resident
+
+A poll cycle ends as soon as the eIM has nothing pending, so
+`ipa_run_from_config()` returns rather than idling. Repeating it is a
+scheduling decision, and it is deliberately **not** in the library:
+
+- `ipad` takes `-i SECONDS` and sleeps between cycles (interruptible by the
+  stop signal), which is right for an init-launched daemon.
+- The APK must schedule itself via `WorkManager`/`AlarmManager` — a native
+  sleep loop would be killed by Doze.
+
+Baking a sleep loop into the core would have forced the wrong primitive on the
+app.
+
+### Single-run guard
+
+`ipa_run()` now refuses a second concurrent run with `-EBUSY` instead of
+letting two poll loops share the stop flag and the nvstate file. An Android
+service that gets restarted is the realistic way to hit this.
+
+### Two bugs found while building this
+
+- **`nvstate_deserialize()` read out of bounds on a truncated nvstate file**
+  (`memcpy` of `sizeof(*nvstate)` with no length check; the following
+  `len - sizeof(*nvstate)` underflowed). An empty file — exactly what a power
+  cut during the nvstate save leaves on an IoT device — crashed the IPAd.
+  Caught by ASan via the new test; now logged and treated as "start over".
+  This was pre-existing and affected the Linux build too.
+- **jansson was missing from the Android dependency script.** Since Phase 2 it
+  is not optional: without it the config loader fails and neither front-end can
+  start. `scripts/build-android-deps.sh` now builds it alongside OpenSSL and
+  libcurl.
+
+### SELinux
+
+`ipad.te` grants the daemon its own domain, `/data/misc/ipa` and outbound
+network access. It grants **no** eUICC access — the integrator adds the rules
+for whatever transport they wire in. For the app-hosted shape the relevant
+gates are the privileged-permission allowlist and the LPA declaration, not
+sepolicy; see `android/privileged-install/`.
 
 ---
 
@@ -364,7 +432,7 @@ not rotate", for when logrotate or the platform owns the policy.
 |---|---|---|
 | Framework channel management vs. core's self-managed channel/SELECT + 61xx GET RESPONSE handling | High | Prototype Phase-1 transceive against real hardware first; gate core changes behind `scard_manages_channel` so Linux is untouched. |
 | `iccTransmitApduLogicalChannel` masking/rewriting CLA bits | Medium | Neutralize the core's CLA channel OR in the Android transport; test SW=9000 round-trips. |
-| SELinux denials for a system daemon reaching telephony | Medium | Provide sepolicy additions; OEM integrator applies. |
+| SELinux denials for a system daemon reaching telephony | ~~Medium~~ **moot** | Resolved differently than expected: a native daemon cannot reach telephony at all (no JVM, no LPA package identity), so the telephony path runs in the app and sepolicy never enters into it. `contrib/android/sepolicy/` covers the native `ipad` daemon for integrator-supplied transports. |
 | BoringSSL/curl/jansson NDK build friction | Low | Well-trodden; superbuild. |
 | JNI threading (poll loop on native thread) | Low | `AttachCurrentThread` in the transport; cache `JavaVM*`. |
 
@@ -375,7 +443,7 @@ not rotate", for when logrotate or the platform owns the policy.
 - **Phase 0:** small–moderate.
 - **Phase 1:** moderate–large + the one hardware-validation spike (dominant on the critical path).
 - **Phases 2–3:** done.
-- **Phase 4:** moderate (mostly integration / sepolicy).
+- **Phase 4:** done.
 - **Phase 5:** moderate (the Android UI/service is the bulk).
 
 The Linux/PC-SC build stays fully intact throughout — every Android change is behind `IPA_TARGET_ANDROID` or a runtime capability flag.

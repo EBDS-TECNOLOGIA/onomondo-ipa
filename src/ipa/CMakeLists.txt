@@ -26,12 +26,14 @@ if(IPA_TARGET_ANDROID)
   find_package(CURL REQUIRED)
 
   # log_jni.c exposes the Phase-3 log sinks to the APK: the UI installs the
-  # ring-buffer sink and polls it for the live log view.
+  # ring-buffer sink and polls it for the live log view.  run_jni.c exposes the
+  # Phase-4 run loop, which is how the app-hosted daemon (a foreground Service)
+  # starts and stops the IPAd.
   #
   # android_spike.c is a Phase-1 on-hardware diagnostic (the eUICC 61xx-chaining
   # spike, driven from the APK); it links into the same .so but is not part of
   # the production flow.  See src/ipa/android_spike.c and android/.
-  add_library(libipacore SHARED http.c scard_android.c scard_jni.c log_jni.c android_spike.c)
+  add_library(libipacore SHARED http.c scard_android.c scard_jni.c log_jni.c run_jni.c android_spike.c)
   set_property(TARGET libipacore PROPERTY C_STANDARD 99)
   target_compile_options(libipacore PRIVATE -Wall)
   target_include_directories(libipacore PUBLIC ${CMAKE_SOURCE_DIR}/include)
@@ -50,6 +52,21 @@ if(IPA_TARGET_ANDROID)
     libasn
     OpenSSL::SSL OpenSSL::Crypto
     CURL::libcurl)
+
+  # ---------------------------------------------------------------------------
+  # ipad: native daemon binary (ANDROID_PORT_PLAN.md, Phase 4).
+  #
+  # A thin main() around ipa_run_from_config() with signal handling, meant to
+  # be launched from an init .rc service; see contrib/android/.  NB: it cannot
+  # use the Android telephony transport, which needs a JVM and the LPA package
+  # identity -- that path runs in the app instead (run_jni.c).  This binary is
+  # for integrators supplying their own eUICC transport.
+  # ---------------------------------------------------------------------------
+  add_executable(ipad ipad_android.c)
+  set_property(TARGET ipad PROPERTY C_STANDARD 99)
+  target_compile_options(ipad PRIVATE -Wall)
+  target_include_directories(ipad PUBLIC ${CMAKE_SOURCE_DIR}/include)
+  target_link_libraries(ipad PRIVATE libipacore)
 else()
   add_library(http STATIC http.c)
   add_library(scard STATIC scard.c)

@@ -1,0 +1,5 @@
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
+# SPDX-License-Identifier: AGPL-3.0-only
+
+/system/bin/ipad          u:object_r:ipad_exec:s0
+/data/misc/ipa(/.*)?      u:object_r:ipad_data_file:s0
