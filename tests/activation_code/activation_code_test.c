@@ -7,6 +7,7 @@
  */
 
 #include <stdio.h>
+#include <stdbool.h>
 #include "src/ipa/libipa/activation_code.h"
 
 void parse_ac(char *ac)
@@ -90,4 +91,9 @@ int ipa_scard_transceive(void *scard_ctx, struct ipa_buf *res, const struct ipa_
 int ipa_scard_free(void *scard_ctx)
 {
 	return 0;
+}
+
+bool ipa_scard_manages_channel(void *scard_ctx)
+{
+	return false;
 }

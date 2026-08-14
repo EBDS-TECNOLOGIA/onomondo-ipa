@@ -94,3 +94,8 @@ int ipa_scard_free(void *scard_ctx)
 {
 	return 0;
 }
+
+bool ipa_scard_manages_channel(void *scard_ctx)
+{
+	return false;
+}
