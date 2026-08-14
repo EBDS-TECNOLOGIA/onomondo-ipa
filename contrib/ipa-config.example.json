@@ -1,0 +1,25 @@
+{
+  "_comment": "See ANDROID_PORT_PLAN.md (Phase 2) for the CLI-flag mapping.",
+
+  "tac": "12345678",
+  "reader_num": 0,
+  "euicc_channel": 1,
+
+  "nvstate_path": "/data/misc/ipa/nvstate.bin",
+
+  "esipa_req_retries": 3,
+  "esipa_binding": "asn1",
+
+  "eim_cabundle": "/system/etc/security/cacerts/eim-ca.pem",
+  "eim_disable_ssl": false,
+  "eim_disable_ssl_verif": false,
+
+  "iot_euicc_emu_enabled": false,
+  "refresh_flag": false,
+
+  "log": {
+    "path": "/data/misc/ipa/ipa.log",
+    "max_size_bytes": 262144,
+    "max_files": 5
+  }
+}
