@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Reaching the eIM over HTTPS from the native core (libcurl). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      The poll cycle drives the eUICC and talks to the eIM, so it must survive
+      the Activity going away; a background service would be killed mid-exchange.
+      Android 14 requires a declared foreground service type, and DATA_SYNC is
+      the fit: the cycle transfers eIM packages and profile data.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Android 13+: without it the foreground-service notification is dropped
+         silently, which makes a running IPAd look dead. Requested at runtime. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <service
+            android:name="com.onomondo.ipa.ipad.IpadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Declared without an intent-filter: the host app decides which
+             activity is the launcher (see app-generic / device-tectoy). -->
+        <activity
+            android:name="com.onomondo.ipa.ipad.SettingsActivity"
+            android:exported="false" />
+    </application>
+
+</manifest>

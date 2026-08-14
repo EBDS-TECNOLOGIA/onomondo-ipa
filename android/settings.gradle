@@ -1,0 +1,35 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "ipa-android-spike"
+
+// Reusable, device-agnostic eUICC spike harness (native + transport + UI).
+include ':spike'
+
+// The IPAd application layer: foreground service running the native poll cycle,
+// live log view, and the settings screen over the shared config.json schema.
+// Device-agnostic; builds on :spike for the transport, native lib and LPA
+// declaration. See ANDROID_PORT_PLAN.md, Phase 5.
+include ':ipad'
+
+// Minimal application that runs the spike on stock AOSP telephony -- builds and
+// installs with no proprietary dependencies. Use this to run the spike on any
+// device (including the Tectoy one, via AOSP telephony) as a baseline.
+include ':app-generic'
+
+// Device-specific application for the Tectoy POS terminal: boots the Tectoy SDK
+// and supplies a DeviceProfile, then reuses everything in :spike. All Tectoy
+// proprietary artifacts stay inside this module (see device-tectoy/README).
+include ':device-tectoy'

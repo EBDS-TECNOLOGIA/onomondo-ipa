@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Privileged-permission allowlist for installing app-generic as a system
+  priv-app (see android/README.md / the privileged-install steps). Required when
+  the device enforces ro.control_privapp_permissions; grants the two
+  signature|privileged permissions eUICC access needs. Push to the
+  etc/permissions/ dir of the SAME partition as the priv-app (e.g.
+  /system/etc/permissions/ for /system/priv-app).
+
+  These three cover both the Phase-1 spike and the Phase-5 IPAd app: the
+  permissions the latter adds (INTERNET, FOREGROUND_SERVICE*, POST_NOTIFICATIONS)
+  are normal or runtime permissions and need no allowlist entry.
+
+  Package must match app-generic's applicationId.
+-->
+<permissions>
+    <privapp-permissions package="com.onomondo.ipa.spike.generic">
+        <permission name="android.permission.MODIFY_PHONE_STATE"/>
+        <permission name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+        <permission name="android.permission.WRITE_EMBEDDED_SUBSCRIPTIONS"/>
+    </privapp-permissions>
+</permissions>

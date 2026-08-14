@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:name=".TectoyApplication"
+        android:allowBackup="true"
+        android:label="IPAd (Tectoy)"
+        android:supportsRtl="true">
+
+        <!-- Launcher is the shared IPAd Activity from :ipad; this app only
+             supplies the Tectoy SDK boot (TectoyApplication) and the
+             DeviceProfile, which both the IPAd and the spike pick up from the
+             Application via DeviceProfileProvider. -->
+        <activity
+            android:name="com.onomondo.ipa.ipad.IpadActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Phase-1 eUICC transport diagnostic, kept installed but off the
+             launcher: reach it with
+             `adb shell am start -n <pkg>/com.onomondo.ipa.spike.SpikeActivity`. -->
+        <activity
+            android:name="com.onomondo.ipa.spike.SpikeActivity"
+            android:exported="true" />
+    </application>
+
+</manifest>

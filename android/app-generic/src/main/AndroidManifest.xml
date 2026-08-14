@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="true"
+        android:label="IPAd"
+        android:supportsRtl="true">
+
+        <!-- The IPAd itself: start/stop the poll cycle and watch the log.
+             No custom Application, so it runs against stock AOSP telephony
+             (GenericDeviceProfile). -->
+        <activity
+            android:name="com.onomondo.ipa.ipad.IpadActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Phase-1 eUICC transport diagnostic, kept installed but off the
+             launcher: reach it with
+             `adb shell am start -n <pkg>/com.onomondo.ipa.spike.SpikeActivity`. -->
+        <activity
+            android:name="com.onomondo.ipa.spike.SpikeActivity"
+            android:exported="true" />
+    </application>
+
+</manifest>
