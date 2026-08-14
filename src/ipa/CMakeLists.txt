@@ -25,7 +25,13 @@ if(IPA_TARGET_ANDROID)
   # -------------------------------------------------------------------------
   find_package(CURL REQUIRED)
 
-  add_library(libipacore SHARED http.c scard_android.c)
+  # log_jni.c exposes the Phase-3 log sinks to the APK: the UI installs the
+  # ring-buffer sink and polls it for the live log view.
+  #
+  # android_spike.c is a Phase-1 on-hardware diagnostic (the eUICC 61xx-chaining
+  # spike, driven from the APK); it links into the same .so but is not part of
+  # the production flow.  See src/ipa/android_spike.c and android/.
+  add_library(libipacore SHARED http.c scard_android.c scard_jni.c log_jni.c android_spike.c)
   set_property(TARGET libipacore PROPERTY C_STANDARD 99)
   target_compile_options(libipacore PRIVATE -Wall)
   target_include_directories(libipacore PUBLIC ${CMAKE_SOURCE_DIR}/include)

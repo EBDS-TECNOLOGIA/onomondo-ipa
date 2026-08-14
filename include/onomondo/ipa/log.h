@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stddef.h>
 
 /*! macro to print a log line.
  *  \param[in] subsys log subsystem identifier.
@@ -20,6 +21,21 @@
 void ipa_logp(uint32_t subsys, uint32_t level, const char *file, int line,
 	      const char *format, ...)
     __attribute__((format(printf, 5, 6)));
+
+/*! Log sink: receives one fully formatted log record -- subsystem/level
+ *  prefix, message and its trailing newline -- in a single call.  Records are
+ *  never split across calls, so a sink may treat each call as one line.
+ *  \param[in] line the formatted record; NUL-terminated, but len is
+ *             authoritative.
+ *  \param[in] len length of the record in bytes, excluding the NUL. */
+typedef void (*ipa_log_sink_cb)(const char *line, size_t len);
+
+/*! Redirect the log to a sink of the caller's choosing.  The default sink
+ *  writes to stderr, which is what the Linux CLI uses; the Android daemon
+ *  installs the rotating-file sink and the APK the ring-buffer sink (see
+ *  onomondo/ipa/log_sink.h).
+ *  \param[in] sink sink to install, or NULL to restore the stderr default. */
+void ipa_log_set_sink(ipa_log_sink_cb sink);
 
 enum log_subsys {
 	SMAIN,

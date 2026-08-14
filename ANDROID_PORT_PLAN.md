@@ -127,6 +127,69 @@ same way via `CMAKE_FIND_ROOT_PATH`.
 
 ## Phase 1 — Android scard backend (the real work)
 
+**Status: implemented AND validated on real hardware (2026-08-13).** The Phase-1
+transport spike ran end-to-end against a Thales "GTO" SGP.32 eUICC on the Tectoy
+POS terminal (armeabi-v7a): ES10c GetEID / ES10b GetEUICCInfo1 / GetEUICCInfo2 all
+succeeded (real EID + EUICCInfo2 with a test-profile label returned). **Result on
+the gating risk (positive):** the modem EXPOSES ISO 61xx chaining — STORE DATA
+returns `61xx` and `GET RESPONSE` over the logical channel assembles the full body,
+so the core's own `recv_es10x_block` loop is viable as-is; the modem does NOT
+auto-assemble. **Key finding:** the transport MUST send TERMINAL CAPABILITY on the
+basic channel (`iccTransmitApduBasicChannel`, `80 AA 00 00 05 A9 03 84 01 01`)
+during channel setup — a phone modem's power-on TERMINAL CAPABILITY did not
+advertise device-LPA support and the eUICC rejected all ES10 with SW=6985 until it
+was re-sent (now done in `EuiccChannel.openChannel`). **Access model finding:**
+ISD-R access on Android is reserved for the LPA (`iccOpenLogicalChannel` identity
+check vs `EuiccConnector.findBestComponent`), so the app had to register a stub
+`EuiccService` and be installed as a privileged system app; see `android/` and
+`android/privileged-install/`. Remaining owed: proactive REFRESH (SW=91xx) /
+basic-channel FETCH / TERMINAL RESPONSE, which need a real profile enable/disable.
+
+What landed:
+- Core seam (`scard_manages_channel`): new `ipa_scard_manages_channel()` in the
+  `scard.h` contract — PC/SC returns false, Android returns true. In `euicc.c`
+  a helper `es10x_channel()` returns 0 (basic channel) when the transport owns
+  the channel so the CLA channel-bit OR is neutralized, and
+  `ipa_euicc_init_es10x()` / `ipa_euicc_close_es10x()` skip
+  termcap/MANAGE CHANNEL/SELECT-ISD-R in that case. The Linux PC/SC path is
+  unchanged (verified: clean build, 9/9 tests). The four test mocks gained the
+  new contract function.
+- `src/ipa/scard_android.c`: real backend — opens/transmits/closes over JNI to
+  a Java `EuiccChannel`, with thread attach/detach and Java-exception→`-EIO`.
+- `src/ipa/scard_jni.c` + `src/ipa/scard_android.h`: JNI bridge (`JNI_OnLoad`
+  caches the `JavaVM`; `EuiccChannel.nativeRegister/Unregister` hand the
+  instance + method IDs to native).
+- `src/ipa/android/EuiccChannel.kt`: `TelephonyManager` logical-channel wrapper
+  (`openChannel`/`transmit`/`closeChannel`); APDU decomposition + CLA-bit
+  clearing live here, so the C backend stays raw-bytes-in/out (OMAPI-swappable).
+- Verified by cross-linking `libipacore.so` (arm64-v8a): `scard_android.c` +
+  `scard_jni.c` compile against the NDK `jni.h`, and `JNI_OnLoad` /
+  `Java_com_onomondo_ipa_EuiccChannel_nativeRegister` / `...nativeUnregister`
+  are exported.
+
+**Still owed (the on-hardware spike, unchanged as the gating risk):** confirm
+`iccTransmitApduLogicalChannel`'s 61xx GET RESPONSE behaviour against a real
+eSIM. The core drives its own 61xx loop and `EuiccChannel.transmit()` passes the
+framework response through verbatim; if a modem/RIL auto-assembles 61xx and
+returns the body with SW=9000 on the triggering command, the core would lose
+data. Also unresolved on-device: FETCH / TERMINAL RESPONSE for a proactive
+REFRESH (SW=91xx) are basic-channel STK APDUs that this logical-channel
+transport cannot route — expected to be handled by the modem, to be confirmed.
+These must be validated before relying on the backend.
+
+*Spike harness delivered (run it to close the 61xx item):* `src/ipa/android_spike.c`
+adds a native diagnostic (`Java_..._EuiccSpike_nativeRunSpike`) built into
+`libipacore.so` that opens the ISD-R channel through the production transport,
+sends known ES10x commands (GetEID / GetEUICCInfo1 / GetEUICCInfo2), records
+every raw APDU exchange and classifies the modem's 61xx behaviour. The Gradle
+app that runs it and shows the report on screen lives in `android/`: a reusable,
+device-agnostic `:spike` library (transport + native JNI + UI + a `DeviceProfile`
+seam), a dependency-free `:app-generic` application (stock AOSP telephony), and a
+`:device-tectoy` application that boots the Tectoy POS SDK and supplies its
+`DeviceProfile` — all vendor-proprietary artifacts confined to that one module.
+The passive spike still does not exercise REFRESH (91xx) / FETCH / TERMINAL
+RESPONSE; that remains for a profile enable/disable on hardware.
+
 New file `src/ipa/scard_android.c` implementing the existing 5-function contract in `scard.h`:
 
 | Function | Android implementation |
@@ -146,19 +209,62 @@ JNI bridge: `scard_jni.c` (native) + a small Kotlin/Java `EuiccChannel` class wr
 
 ## Phase 2 — JSON configuration
 
-- New entry module `ipa_config_json.c`: parse a config file with jansson (already a dependency) into `struct ipa_config` plus the auxiliary paths currently held as locals in `main.c` (nvstate path, initial-eIM-config path, one-pkg-only, memory-reset).
-- Key-per-CLI-flag mapping (all fields already flat in `ipad.h`): `tac`, `preferred_eim_id`, `reader_num`, `euicc_channel`, `eim_cabundle`, `eim_disable_ssl`, `eim_disable_ssl_verif`, `esipa_req_retries`, `esipa_binding`, `iot_euicc_emu_enabled`, plus `nvstate_path`, `initial_eim_cfg_path`, and a `log` block (Phase 3).
-- Validation + defaults mirror `main.c`'s current defaults; on missing/invalid file, fail with a clear log line.
-- `main.c` stays the Linux/PC-SC entry; the daemon and APK call a new shared `ipa_run_from_config(const char *json_path)`. Keeps CLI Linux behavior intact.
+**Status: done (2026-08-14).** Implemented and unit-tested on the Linux build;
+the Linux CLI is unchanged except for one additive flag. What landed:
+
+- `src/ipa/libipa/config_json.c` + `include/onomondo/ipa/config_json.h` —
+  parses the file into a `struct ipa_run_config`, which is `struct ipa_config`
+  plus the auxiliary settings `main.c` used to keep as locals (`nvstate_path`,
+  `initial_eim_cfg_path`, `euicc_memory_reset`, `one_euicc_pkg_only`) and the
+  `log` block Phase 3 will consume.
+- `src/ipa/libipa/run.c` — `ipa_run_from_config(const char *json_path)` and
+  `ipa_run(struct ipa_run_config *)`: the same sequence `main.c` performs
+  (load nvstate → create context → init → apply initial eIM config /
+  memory reset / poll loop → write nvstate back), expressed once so the
+  daemon (Phase 4) and the APK (Phase 5) share it. `ipa_run_stop()` leaves the
+  poll loop; it is async-signal-safe, and the CLI wires it to `SIGUSR1`
+  alongside the existing `running=false`.
+- `src/ipa/libipa/fileio.c` — whole-file load/save helpers, so the CLI and the
+  config-driven path read the nvstate and BER blobs through one
+  implementation instead of two copies.
+- `tests/config_json/` — unit tests for defaults, every key, partial
+  configuration, comment keys, the shipped example, and 25 rejection cases.
+  Clean under ASan + UBSan.
+- `contrib/ipa-config.example.json` — annotated example; the test parses it,
+  so it cannot drift away from the parser.
+
+**Defaults live in one place.** `config_json.h` defines `IPA_DEFAULT_*` and
+`main.c` now derives its `DEFAULT_*` macros from them, so the CLI and the
+config file cannot disagree about what "unset" means.
+
+**Parsing is strict.** An unknown key, a wrong JSON type, or an out-of-range
+number is a hard error naming the offending key, not something ignored. On an
+unattended device a typo would otherwise silently run the IPAd on a default
+the operator never chose. The escape hatch is that any key starting with `_`
+is ignored, so a file can carry `"_comment"` annotations despite JSON having
+no comment syntax. Absent keys are not errors — they take the default, exactly
+as an omitted CLI flag does.
+
+**Not expressible in JSON, on purpose:** the ES10b one-shot triggers
+(`-i/-F/-b/-X/-x/-G/-D`) and the profile-installation consent callback (`-a`).
+The triggers are device-policy decisions a daemon makes through the `ipa_*`
+API in `ipad.h` at the moment its own signals fire, not a startup setting; the
+callback is deprecated (github issue #5) and is a function pointer.
+
+**Build note:** jansson detection in `src/ipa/libipa/CMakeLists.txt` used to
+rely on `pkg-config` alone, so on a machine with `libjansson-dev` installed but
+no `pkg-config` binary the ESipa JSON binding was silently compiled out. A
+`find_path`/`find_library` fallback was added; without jansson the config
+loader now fails with a clear log line rather than starting on defaults.
 
 ### CLI flag -> JSON key mapping
 
 | CLI flag | JSON key | Notes |
 |---|---|---|
-| `-t TAC` | `tac` | hex string |
+| `-t TAC` | `tac` | hex string, exactly 8 digits |
 | `-e eimId` | `preferred_eim_id` | optional |
 | `-r N` | `reader_num` | SIM slot on Android |
-| `-c N` | `euicc_channel` | ignored when transport manages the channel |
+| `-c N` | `euicc_channel` | 0..19; ignored when the transport manages the channel |
 | `-f PATH` | `initial_eim_cfg_path` | |
 | `-m` | `euicc_memory_reset` | boolean |
 | `-n PATH` | `nvstate_path` | |
@@ -168,17 +274,69 @@ JNI bridge: `scard_jni.c` (native) + a small Kotlin/Java `EuiccChannel` class wr
 | `-I` | `eim_disable_ssl_verif` | boolean |
 | `-E` | `iot_euicc_emu_enabled` | boolean |
 | `-1` | `one_euicc_pkg_only` | boolean |
-| (new) | `log.max_size_bytes` | rotating-file sink |
-| (new) | `log.max_files` | rotating-file sink |
+| `-R` | `refresh_flag` | boolean |
+| (none) | `esipa_binding` | `"asn1"` (default) or `"json"` |
+| (new) | `log.path` | rotating-file sink (Phase 3) |
+| (new) | `log.max_size_bytes` | rotating-file sink; max 1 GiB |
+| (new) | `log.max_files` | rotating-file sink; max 1000 |
+| (new) | `-j PATH` | **CLI-only**: run from a JSON file. Takes over completely — the other flags are ignored, so there is never a second source of truth for the same setting. Lets the Linux build exercise the exact entry point the daemon and the APK use. |
 
 ---
 
 ## Phase 3 — Logging: sink abstraction + rotation
 
-- In `log.c`: replace the hardcoded `fprintf(stderr, ...)` in `ipa_logp` with a registered sink `void (*)(const char *line, size_t len)` (default sink = stderr, so Linux is unchanged). Add `ipa_log_set_sink(...)`.
-- **Rotating-file sink** (daemon): size-tracked writer honoring `log.max_size_bytes` + `log.max_files` from JSON; rename `foo.log` -> `foo.log.1` ... on threshold. Contained in a new `log_file_sink.c`.
-- **Ring-buffer sink** (APK): fixed-capacity in-memory buffer with a JNI getter the UI polls (or a callback pushed to the JVM). New `log_ring_sink.c`.
-- Also route the `printf` status banner in the entry path through the log so the APK sees it too (small cleanup; `print_help` stays CLI-only).
+**Status: done (2026-08-14).** The Linux CLI's stderr output is byte-identical
+— the golden-file `compare_stderr` test still passes untouched. What landed:
+
+- `log.c` — `ipa_logp()` now formats the whole record (prefix + message) into
+  one buffer and hands it to a registered sink, instead of two `fprintf`s
+  straight to stderr. `ipa_log_set_sink(NULL)` restores the stderr default.
+  A record longer than the 512-byte stack buffer is re-formatted on the heap
+  rather than truncated. Incidental benefit: one `fwrite` per record means
+  concurrent writers can no longer interleave a prefix with another thread's
+  message.
+- `log_file_sink.c` — rotating-file sink for the daemon.  `<path>` → `<path>.1`
+  → `<path>.2` …, oldest deleted; `max_files` counts the live file. Opens with
+  append and counts the existing size, so a restart neither loses the log nor
+  bypasses the size cap. Each record is flushed as written — a daemon that dies
+  mid-session is precisely what the log is for.
+- `log_ring_sink.c` — fixed-capacity ring buffer for the APK. Drops oldest
+  content **on record boundaries**, so a reader never receives the tail of a
+  line whose start it never saw. `ipa_log_ring_sink_read()` is a destructive
+  drain, which is what a UI that appends wants.
+- `log_jni.c` (Android target only) — `nativeLogRingInit` / `nativeLogDrain` /
+  `nativeLogRingFree`, plus `nativeLogFileInit` / `nativeLogFileFree`, on
+  `com.onomondo.ipa.NativeBridge`. `nativeLogDrain` returns `null` on an idle
+  poll so the UI can skip the append.
+- `run.c` — installs the file sink from the config's `log` block before
+  anything else is logged, and logs an "IPAd starting" session marker.
+- `tests/log_sink/` — 12 cases: sink dispatch (including an over-long record),
+  append-on-restart, rotation, generation cap, rotation disabled, `max_files=1`,
+  init failure, ring drain/overflow/oversized-record/partial-read, and sink
+  switching. Clean under ASan **and** ThreadSanitizer.
+
+**Both sinks are mutex-protected**, because the APK's UI drains the ring from
+one thread while the poll loop writes from another. `libipa` therefore links
+`Threads::Threads`; on Android and modern glibc that resolves to nothing.
+
+**Sinks install themselves.** `ipa_log_file_sink_init()` / `ipa_log_ring_sink_init()`
+make themselves the active sink and the matching `_free()` restores stderr, so
+a front-end never calls `ipa_log_set_sink()` directly. Only one is active at a
+time; installing the second displaces the first.
+
+**A failed log file is not fatal.** If the configured path cannot be opened,
+`ipa_run()` complains loudly and carries on with the stderr sink. Logging is
+diagnostics; refusing to provision the device because a log file is unwritable
+would be the worse failure.
+
+**One line necessarily escapes to stderr:** `config: loaded <path>`, emitted by
+`ipa_config_json_load()` before the sink can exist — the sink's own path comes
+from the file being loaded. Everything after that goes to the configured sink.
+
+**Rotation defaults** live in `log_sink.h` (`IPA_DEFAULT_LOG_MAX_SIZE_BYTES` =
+256 KiB, `IPA_DEFAULT_LOG_MAX_FILES` = 5) and are applied when `log.path` is
+set but the limits are not. An explicit `"max_size_bytes": 0` still means "do
+not rotate", for when logrotate or the platform owns the policy.
 
 ---
 
@@ -216,7 +374,7 @@ JNI bridge: `scard_jni.c` (native) + a small Kotlin/Java `EuiccChannel` class wr
 
 - **Phase 0:** small–moderate.
 - **Phase 1:** moderate–large + the one hardware-validation spike (dominant on the critical path).
-- **Phases 2–3:** ~1 day each.
+- **Phases 2–3:** done.
 - **Phase 4:** moderate (mostly integration / sepolicy).
 - **Phase 5:** moderate (the Android UI/service is the bulk).
 

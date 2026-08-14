@@ -34,6 +34,7 @@
 #include <onomondo/ipa/utils.h>
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/config_json.h>
+#include <onomondo/ipa/log_sink.h>
 #include "fileio.h"
 
 /* strdup() through the project allocator, so allocations stay balanced in the
@@ -58,6 +59,11 @@ void ipa_run_config_defaults(struct ipa_run_config *rcfg)
 	ipa_binary_from_hexstr(rcfg->cfg.tac, sizeof(rcfg->cfg.tac), IPA_DEFAULT_TAC);
 
 	rcfg->nvstate_path = cfg_strdup(IPA_DEFAULT_NVSTATE_PATH);
+
+	/* Rotation defaults apply whenever "log.path" is configured; an
+	 * explicit 0 for max_size_bytes still means "do not rotate". */
+	rcfg->log.max_size_bytes = IPA_DEFAULT_LOG_MAX_SIZE_BYTES;
+	rcfg->log.max_files = IPA_DEFAULT_LOG_MAX_FILES;
 }
 
 void ipa_run_config_free(struct ipa_run_config *rcfg)

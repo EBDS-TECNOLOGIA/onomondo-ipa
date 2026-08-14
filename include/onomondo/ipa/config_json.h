@@ -78,10 +78,11 @@ struct ipa_run_config {
 	 *  Debug aid; mirrors the CLI's -1. */
 	bool one_euicc_pkg_only;
 
-	/*! Rotating-file log sink settings (JSON: the "log" object).  Parsed
-	 *  here; consumed by the log sink introduced in Phase 3.  path is NULL
-	 *  when no "log" object was present, which means "keep the default
-	 *  stderr sink". */
+	/*! Rotating-file log sink settings (JSON: the "log" object), handed to
+	 *  ipa_log_file_sink_init() by ipa_run().  path is NULL when no log file
+	 *  was configured, which means "keep the default stderr sink".  The two
+	 *  size limits default to IPA_DEFAULT_LOG_MAX_* (see log_sink.h); an
+	 *  explicit max_size_bytes of 0 disables rotation. */
 	struct {
 		char *path;
 		size_t max_size_bytes;

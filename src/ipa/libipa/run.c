@@ -20,6 +20,7 @@
  */
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <string.h>
 #include <signal.h>
@@ -29,6 +30,7 @@
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/ipad.h>
 #include <onomondo/ipa/config_json.h>
+#include <onomondo/ipa/log_sink.h>
 #include "fileio.h"
 
 /* Set from ipa_run_stop(), which may run in a signal handler or in another
@@ -103,18 +105,41 @@ int ipa_run(struct ipa_run_config *rcfg)
 	struct ipa_buf *nvstate_load = NULL;
 	struct ipa_buf *nvstate_save = NULL;
 	struct ipa_buf *eim_cfg = NULL;
+	bool log_file_open = false;
 	int rc;
 
 	if (!rcfg)
 		return -EINVAL;
 
 	run_stop = 0;
+
+	/* Switch to the rotating-file sink before anything is logged, so the
+	 * configuration banner lands in the file too.  A log file we cannot open
+	 * is worth complaining about loudly, but it is diagnostics rather than
+	 * function: the IPAd carries on with the stderr sink instead of refusing
+	 * to run the device's provisioning. */
+	if (rcfg->log.path) {
+		rc = ipa_log_file_sink_init(rcfg->log.path, rcfg->log.max_size_bytes, rcfg->log.max_files);
+		if (rc < 0) {
+			log_file_open = false;
+			IPA_LOGP(SMAIN, LERROR, "cannot open log file %s: %s -- logging to stderr\n",
+				 rcfg->log.path, strerror(-rc));
+		} else {
+			log_file_open = true;
+		}
+	}
+
+	/* Session marker: in a rotating log file this is what tells you where one
+	 * run ends and the next begins.  The CLI's own "IPAd!" banner stays on
+	 * stdout for the interactive user. */
+	IPA_LOGP(SMAIN, LINFO, "IPAd starting\n");
 	log_config(rcfg);
 
 	if (rcfg->cfg.eim_cabundle && access(rcfg->cfg.eim_cabundle, R_OK) < 0) {
 		IPA_LOGP(SMAIN, LERROR, "error accessing CA bundle %s: %s\n", rcfg->cfg.eim_cabundle,
 			 strerror(errno));
-		return -EINVAL;
+		rc = -EINVAL;
+		goto close_log;
 	}
 
 	/* A missing nvstate file is normal on first start -- the context then
@@ -180,6 +205,10 @@ leave:
 	}
 	IPA_FREE(nvstate_load);
 	IPA_FREE(nvstate_save);
+
+close_log:
+	if (log_file_open)
+		ipa_log_file_sink_free();
 	return rc;
 }
 

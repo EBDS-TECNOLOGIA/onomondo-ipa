@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <onomondo/ipa/utils.h>
 #include <onomondo/ipa/config_json.h>
+#include <onomondo/ipa/log_sink.h>
 
 static struct ipa_run_config *parse(const char *json)
 {
@@ -45,8 +46,8 @@ static void defaults_test(void)
 	assert(rcfg->euicc_memory_reset == false);
 	assert(rcfg->one_euicc_pkg_only == false);
 	assert(rcfg->log.path == NULL);
-	assert(rcfg->log.max_size_bytes == 0);
-	assert(rcfg->log.max_files == 0);
+	assert(rcfg->log.max_size_bytes == IPA_DEFAULT_LOG_MAX_SIZE_BYTES);
+	assert(rcfg->log.max_files == IPA_DEFAULT_LOG_MAX_FILES);
 
 	ipa_run_config_free(rcfg);
 }
@@ -199,6 +200,27 @@ static void comment_key_test(void)
 	ipa_run_config_free(rcfg);
 }
 
+/* Rotation limits default when absent, but an explicit 0 must survive: it is
+ * how an operator says "do not rotate, something else owns the policy". */
+static void log_defaults_test(void)
+{
+	struct ipa_run_config *rcfg;
+
+	printf("log_defaults_test\n");
+
+	rcfg = parse("{\"log\": {\"path\": \"/tmp/ipa.log\"}}");
+	assert(rcfg);
+	assert(strcmp(rcfg->log.path, "/tmp/ipa.log") == 0);
+	assert(rcfg->log.max_size_bytes == IPA_DEFAULT_LOG_MAX_SIZE_BYTES);
+	assert(rcfg->log.max_files == IPA_DEFAULT_LOG_MAX_FILES);
+	ipa_run_config_free(rcfg);
+
+	rcfg = parse("{\"log\": {\"path\": \"/tmp/ipa.log\", \"max_size_bytes\": 0}}");
+	assert(rcfg);
+	assert(rcfg->log.max_size_bytes == 0);
+	ipa_run_config_free(rcfg);
+}
+
 /* A missing file is an error, not an excuse to run on defaults. */
 static void missing_file_test(void)
 {
@@ -223,6 +245,7 @@ int main(int argc, char **argv)
 	partial_config_test();
 	rejection_test();
 	comment_key_test();
+	log_defaults_test();
 	example_config_test();
 	missing_file_test();
 
