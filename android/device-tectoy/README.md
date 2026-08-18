@@ -1,12 +1,23 @@
 # device-tectoy
 
 Device-specific application module for the **Tectoy POS terminal**. It boots the
-Tectoy hardware SDK and supplies a `DeviceProfile` to the reusable `:spike`
-harness; everything else (the eUICC transport, the native core, the spike UI)
-comes from `:spike` and knows nothing about Tectoy.
+Tectoy hardware SDK and supplies a `DeviceProfile` to the reusable `:core`
+library; everything else (the eUICC transport, the native core, the IPAd UI and
+the spike diagnostic) comes from `:core`/`:ipad` and knows nothing about Tectoy.
 
 This module is the *only* place Tectoy-proprietary bits live, which is what keeps
 the rest of the project device-agnostic ("just one possible device").
+
+> **Do not install this module as a system priv-app.** The vendor AAR merges 56
+> permissions, about half of them `signature|privileged`, and a priv-app holding
+> even one permission that is not in an allowlist stops the device from booting
+> (confirmed on the terminal, 2026-08-18). Install `app-generic` privileged
+> instead -- it needs three allowlist entries and reaches the eUICC through
+> stock AOSP telephony on this very device, which is how the Phase-1 spike
+> passed. Sideloading `device-tectoy` with `adb install` is fine and harmless;
+> it simply cannot open the ISD-R. See
+> [`../privileged-install/README.md`](../privileged-install/README.md) for the
+> allowlist procedure and the boot-loop recovery.
 
 ## Required vendor artifacts (not committed)
 
@@ -27,7 +38,7 @@ demo's `app/armeabi-v7a/`) and the terminal needs them, drop them under
 
 ## Native core
 
-`libipacore.so` is provided by the `:spike` library (see the top-level
+`libipacore.so` is provided by the `:core` library (see the top-level
 `android/README.md`); you do **not** copy it here.
 
 ## If the SDK is absent

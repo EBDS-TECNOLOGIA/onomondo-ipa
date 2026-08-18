@@ -52,6 +52,34 @@
 /*! Highest logical channel number an ISO 7816-4 CLA byte can encode. */
 #define IPA_MAX_CHANNEL_NUMBER 19
 
+/*! Default poll interval when the key is absent: 0, meaning "run one poll
+ *  cycle and stop".  This is what the IPAd has always done, so an existing
+ *  configuration file and the ipad(8) daemon keep their behaviour.  A
+ *  front-end that repeats by default writes the key explicitly -- the APK
+ *  seeds it with 15 seconds. */
+#define IPA_DEFAULT_POLL_INTERVAL 0
+
+/*! Shortest poll interval that may be configured, in seconds.  0 is still
+ *  allowed and means "do not repeat"; anything between 1 and this is refused.
+ *  A cycle that reaches the eIM over the network and drives the eUICC takes
+ *  longer than a second or two, so a shorter interval would just stack cycles
+ *  back to back and hammer the eIM without polling any more often in
+ *  practice. */
+#define IPA_MIN_POLL_INTERVAL_SECONDS 5
+
+/*! Upper bound on the poll interval, in seconds (24 h).  A sanity limit: a
+ *  device that checks in less often than once a day is misconfigured, and
+ *  bounding it here keeps the minutes-to-seconds conversion in range. */
+#define IPA_MAX_POLL_INTERVAL_SECONDS (24 * 60 * 60)
+
+/*! Unit the configured poll interval is expressed in.  The value is kept as
+ *  the operator entered it, rather than normalised to seconds on load, so a
+ *  settings UI can show "30 minutes" back instead of "1800 seconds". */
+enum ipa_poll_interval_unit {
+	IPA_POLL_INTERVAL_SECONDS,
+	IPA_POLL_INTERVAL_MINUTES,
+};
+
 /*! Everything a front-end needs to run the IPAd, as parsed from the JSON
  *  configuration file.
  *
@@ -77,6 +105,18 @@ struct ipa_run_config {
 	/*! Stop after a single eUICC package (JSON: one_euicc_pkg_only).
 	 *  Debug aid; mirrors the CLI's -1. */
 	bool one_euicc_pkg_only;
+
+	/*! How long to wait between poll cycles (JSON: poll_interval), in the
+	 *  unit below.  0 means "one cycle, then stop" -- the IPAd's original
+	 *  behaviour.  The core itself is run-to-completion: a poll cycle ends
+	 *  as soon as the eIM has nothing pending, so repeating it is the
+	 *  front-end's job and this value is what the front-ends read.  See
+	 *  ipa_run_config_poll_seconds(). */
+	unsigned int poll_interval;
+
+	/*! Unit of poll_interval (JSON: poll_interval_unit, "seconds" or
+	 *  "minutes"). */
+	enum ipa_poll_interval_unit poll_interval_unit;
 
 	/*! Rotating-file log sink settings (JSON: the "log" object), handed to
 	 *  ipa_log_file_sink_init() by ipa_run().  path is NULL when no log file
@@ -110,6 +150,12 @@ struct ipa_run_config *ipa_config_json_parse(const char *json, size_t json_len);
  *           ipa_run_config_free()), or NULL when the file is missing,
  *           unreadable or invalid.  The reason is logged. */
 struct ipa_run_config *ipa_config_json_load(const char *path);
+
+/*! The configured poll interval in seconds, whatever unit it was written in.
+ *  \param[in] rcfg run configuration.
+ *  \returns interval in seconds, or 0 for "run one cycle and stop" (also
+ *           returned when rcfg is NULL). */
+unsigned int ipa_run_config_poll_seconds(const struct ipa_run_config *rcfg);
 
 /*! Release a run configuration and everything it owns (NULL-safe).
  *  \param[in] rcfg run configuration to free. */

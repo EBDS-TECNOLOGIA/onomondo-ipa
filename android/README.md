@@ -8,16 +8,28 @@ stays installed as a diagnostic.
 
 ## The IPAd app
 
-`IpadActivity` starts and stops a foreground service (`IpadService`) that runs
-one native poll cycle via `NativeBridge.run(configPath)`, and tails the core's
-log live from the in-memory ring sink. `SettingsActivity` edits the very same
+`IpadActivity` drives a foreground service (`IpadService`) that runs native
+poll cycles via `NativeBridge.run(configPath)`, and tails the core's log live
+from the in-memory ring sink. `SettingsActivity` edits the very same
 `config.json` the native parser reads — there is one schema and one file, not a
 Kotlin shadow copy of it.
 
+| Button | What it does |
+| --- | --- |
+| **Start** | Poll, wait `poll_interval`, poll again, until **Stop**. |
+| **Run once** | A single poll cycle, whatever the interval says. |
+| **Stop** | Ends the loop; cuts short a wait immediately, and unwinds a cycle in flight once the current eIM request and eUICC exchange finish. |
+
 A poll cycle is run-to-completion: it ends when the eIM has nothing further
-pending, and the service then stops itself. Re-running it on a schedule is the
-host app's job (`WorkManager`/`AlarmManager`); a sleep loop would be killed by
-Doze.
+pending. The repeating is done by the service, not the core, and the interval
+is re-read between cycles so a change in Settings applies to the next wait.
+Set it in **seconds** or **minutes** with the toggle beside the field; the
+minimum is 5 seconds and `0` means "one cycle per Start". A partial wake lock
+is held while looping so the interval elapses in real time.
+
+For long intervals on a battery-powered device, `AlarmManager`'s
+`setExactAndAllowWhileIdle` is the better instrument — the in-service loop is
+built for a mains-powered terminal polling every few seconds to minutes.
 
 Reach the diagnostic with:
 
@@ -39,19 +51,22 @@ prints a verdict on screen.
 
 ## Layout — device setup is kept separate from the harness
 
-    :spike          Android library. Device-agnostic and reusable: the eUICC
+    :core           Android library. Device-agnostic and reusable: the eUICC
                     transport (EuiccChannel) and the JNI face of the core
                     (NativeBridge), both shared verbatim from
-                    ../src/ipa/android; the native spike JNI (EuiccSpike); the
-                    spike UI (SpikeActivity); the DeviceProfile seam; and the
-                    LPA (EuiccService) declaration plus telephony permissions
-                    that ISD-R access depends on. Ships libipacore.so in its
+                    ../src/ipa/android; the DeviceProfile seam; and the LPA
+                    (EuiccService) declaration plus telephony permissions that
+                    ISD-R access depends on. Ships libipacore.so in its
                     jniLibs. No vendor deps.
 
+                    The Phase-1 diagnostic (EuiccSpike + SpikeActivity) also
+                    lives here, kept in its own com.onomondo.ipa.spike package
+                    so the name stays on the code that really is the spike.
+
     :ipad           Android library. The IPAd application layer: IpadService
-                    (foreground poll cycle), IpadActivity (start/stop + live
-                    log), SettingsActivity and ConfigStore (config.json).
-                    Device-agnostic; builds on :spike. Framework-only UI, so it
+                    (foreground poll loop), IpadActivity (start/run once/stop +
+                    live log), SettingsActivity and ConfigStore (config.json).
+                    Device-agnostic; builds on :core. Framework-only UI, so it
                     imposes no theme or support library on its host.
 
     :app-generic    Application. Runs on stock AOSP telephony with NO
@@ -70,7 +85,7 @@ library; `:device-tectoy` is the worked example of that separation.
 ## Prerequisites
 
 - `libipacore.so` for the target ABI at
-  `spike/src/main/jniLibs/<abi>/libipacore.so`. Produce it from the repo root:
+  `core/src/main/jniLibs/<abi>/libipacore.so`. Produce it from the repo root:
 
       NDK_ROOT=/path/to/android-ndk-r27d \
         scripts/build-android-deps.sh armeabi-v7a /tmp/ipa-deps/armeabi-v7a
@@ -83,7 +98,7 @@ library; `:device-tectoy` is the worked example of that separation.
       cmake --build build-android-armv7 --parallel
 
       cp build-android-armv7/src/ipa/libipacore.so \
-         android/spike/src/main/jniLibs/armeabi-v7a/libipacore.so
+         android/core/src/main/jniLibs/armeabi-v7a/libipacore.so
 
   The Tectoy terminal is 32-bit (`armeabi-v7a`). Add `arm64-v8a` similarly for
   64-bit gear (and to `abiFilters`).
@@ -127,8 +142,11 @@ Validated on hardware during the Phase-1 spike. Opening the ISD-R channel needs
 
 1. **`MODIFY_PHONE_STATE`** (signature|privileged), for
    `iccOpenLogicalChannel` / `iccTransmitApduLogicalChannel`. Satisfied by a
-   system/priv-app install; see `privileged-install/`. A plain side-load is
-   denied with a `SecurityException` — debuggable is *not* privileged.
+   system/priv-app install; see
+   [`privileged-install/README.md`](privileged-install/README.md) for the full
+   per-device procedure (bootloader unlock, verity, allowlist). A plain
+   side-load is denied with a `SecurityException` — debuggable is *not*
+   privileged.
 
 2. **Being the device's LPA.** Android checks that the calling package is the
    one `EuiccConnector.findBestComponent()` selects, i.e. a system app
@@ -137,10 +155,10 @@ Validated on hardware during the Phase-1 spike. Opening the ISD-R channel needs
    do **not** substitute — without it you get
    "The calling package is not allowed to access ISD-R".
 
-   `:spike` declares `SpikeEuiccService` (a stub that exists purely to win that
+   `:core` declares `IpaEuiccService` (a stub that exists purely to win that
    selection, at intent-filter priority 1000) and both apps inherit it through
    manifest merge. Subclassing `EuiccService` needs the `@SystemApi` stubs in
-   `spike/libs/` — `compileOnly`, never packaged.
+   `core/libs/` — `compileOnly`, never packaged.
 
 One more hardware finding worth repeating: the modem's power-on TERMINAL
 CAPABILITY does not reliably advertise device-LPA support. A Thales "GTO" eUICC

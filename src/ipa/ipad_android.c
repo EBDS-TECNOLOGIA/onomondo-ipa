@@ -104,6 +104,7 @@ static void print_usage(const char *argv0)
 	printf("usage: %s [-c PATH] [-i SECONDS]\n", argv0);
 	printf("  -c PATH      JSON configuration file (default: %s)\n", DEFAULT_CONFIG_PATH);
 	printf("  -i SECONDS   re-run every SECONDS instead of exiting after one\n");
+	printf("               (overrides \"poll_interval\" in the configuration file)\n");
 	printf("               poll cycle (default: 0, i.e. run once and exit)\n");
 	printf("  -h           print this text\n");
 }
@@ -111,7 +112,7 @@ static void print_usage(const char *argv0)
 int main(int argc, char **argv)
 {
 	const char *config_path = DEFAULT_CONFIG_PATH;
-	unsigned long interval = 0;
+	unsigned long interval = 0;	/* 0 until -i or the config file sets it */
 	int i;
 	int rc;
 
@@ -136,6 +137,21 @@ int main(int argc, char **argv)
 	install_signal_handlers();
 
 	IPA_LOGP(SMAIN, LINFO, "IPAd daemon starting, configuration %s\n", config_path);
+
+	/* Without -i, the interval comes from the configuration file, so a
+	 * device deployed with an init service and a config.json needs no
+	 * command line at all.  Read once: changing the interval is a restart,
+	 * whereas everything else in the file is re-read on every cycle. */
+	if (interval == 0) {
+		struct ipa_run_config *rcfg = ipa_config_json_load(config_path);
+
+		if (rcfg) {
+			interval = ipa_run_config_poll_seconds(rcfg);
+			ipa_run_config_free(rcfg);
+		}
+		if (interval)
+			IPA_LOGP(SMAIN, LINFO, "poll interval %lu s (from %s)\n", interval, config_path);
+	}
 
 	/* A poll cycle ends as soon as the eIM has nothing further pending, so
 	 * the IPAd is a run-to-completion program rather than a resident loop.

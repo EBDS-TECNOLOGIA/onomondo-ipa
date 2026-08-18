@@ -19,6 +19,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.ToggleButton
 import android.widget.Toast
 import org.json.JSONObject
 
@@ -35,6 +36,10 @@ import org.json.JSONObject
  * Only the keys worth touching on a device are exposed; the full schema is
  * larger. Anything not listed survives a save untouched, because the existing
  * JSONObject is edited rather than rebuilt.
+ *
+ * One exception to leaving validation native: the poll interval is checked here
+ * too, so a bad value is refused while it is being typed rather than at the
+ * start of the next run. See [saveInterval].
  */
 class SettingsActivity : Activity() {
 
@@ -53,6 +58,8 @@ class SettingsActivity : Activity() {
     private lateinit var iotEmulation: CheckBox
     private lateinit var refreshFlag: CheckBox
     private lateinit var jsonBinding: CheckBox
+    private lateinit var pollInterval: EditText
+    private lateinit var pollUnit: ToggleButton
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,6 +86,13 @@ class SettingsActivity : Activity() {
         refreshFlag.isChecked = config.optBoolean("refresh_flag", false)
         jsonBinding.isChecked = config.optString("esipa_binding", "asn1") == "json"
 
+        pollInterval.setText(
+            config.optInt(ConfigStore.KEY_INTERVAL, ConfigStore.DEFAULT_INTERVAL).toString()
+        )
+        pollUnit.isChecked =
+            config.optString(ConfigStore.KEY_INTERVAL_UNIT, ConfigStore.UNIT_SECONDS) ==
+                ConfigStore.UNIT_MINUTES
+
         val log = config.optJSONObject("log") ?: JSONObject()
         logMaxSize.setText(log.optLong("max_size_bytes", ConfigStore.DEFAULT_LOG_MAX_SIZE).toString())
         logMaxFiles.setText(log.optInt("max_files", ConfigStore.DEFAULT_LOG_MAX_FILES).toString())
@@ -91,6 +105,8 @@ class SettingsActivity : Activity() {
      * well-formed JSON of the right *types*.
      */
     private fun save() {
+        if (!saveInterval()) return
+
         config.put("tac", tac.text.toString().trim())
         config.put("reader_num", readerNum.text.toString().trim().toIntOrNull() ?: 0)
         config.put("esipa_req_retries", retries.text.toString().trim().toIntOrNull()
@@ -117,6 +133,54 @@ class SettingsActivity : Activity() {
         finish()
     }
 
+    /**
+     * The one field validated here rather than left to the native parser.
+     * The floor exists because a cycle that talks to the eIM over the network
+     * takes longer than a couple of seconds anyway, and refusing it at the
+     * moment it is typed beats a run that fails minutes later with the reason
+     * buried in the log. The same rule is enforced in `config_json.c`, which
+     * remains the authority for a file edited by hand.
+     *
+     * @return true when the interval was accepted and written.
+     */
+    private fun saveInterval(): Boolean {
+        val minutes = pollUnit.isChecked
+        val value = pollInterval.text.toString().trim().toIntOrNull()
+
+        if (value == null || value < 0) {
+            Toast.makeText(this, "Poll interval must be a whole number", Toast.LENGTH_LONG).show()
+            return false
+        }
+
+        val seconds = if (minutes) value * 60 else value
+        if (value > 0 && seconds < ConfigStore.MIN_INTERVAL_SECONDS) {
+            Toast.makeText(
+                this,
+                "Poll interval must be 0 (single cycle) or at least " +
+                    "${ConfigStore.MIN_INTERVAL_SECONDS} seconds",
+                Toast.LENGTH_LONG
+            ).show()
+            return false
+        }
+
+        val max = if (minutes) ConfigStore.MAX_INTERVAL_MINUTES else ConfigStore.MAX_INTERVAL_SECONDS
+        if (value > max) {
+            Toast.makeText(
+                this,
+                "Poll interval must be at most $max ${if (minutes) "minutes" else "seconds"}",
+                Toast.LENGTH_LONG
+            ).show()
+            return false
+        }
+
+        config.put(ConfigStore.KEY_INTERVAL, value)
+        config.put(
+            ConfigStore.KEY_INTERVAL_UNIT,
+            if (minutes) ConfigStore.UNIT_MINUTES else ConfigStore.UNIT_SECONDS
+        )
+        return true
+    }
+
     /** An empty field means "unset", which is not the same as an empty value. */
     private fun putOrRemove(key: String, value: String) {
         if (value.isEmpty()) config.remove(key) else config.put(key, value)
@@ -140,6 +204,19 @@ class SettingsActivity : Activity() {
         iotEmulation = col.check("Emulate IoT eUICC (consumer eUICC compatibility)")
         refreshFlag = col.check("Request UICC REFRESH on profile change")
         jsonBinding = col.check("Use JSON ESipa binding (default: ASN.1)")
+
+        col.heading("Polling")
+        pollInterval = col.field(
+            "Interval between cycles (0 = single cycle per Start)",
+            InputType.TYPE_CLASS_NUMBER
+        )
+        pollUnit = ToggleButton(this).apply {
+            textOff = "seconds"
+            textOn = "minutes"
+            // ToggleButton shows textOff/textOn only after isChecked is applied.
+            isChecked = false
+        }
+        col.addView(pollUnit, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         col.heading("Log file")
         logMaxSize = col.field("Rotate at (bytes; 0 = never)", InputType.TYPE_CLASS_NUMBER)

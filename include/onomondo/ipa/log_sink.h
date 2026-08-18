@@ -13,19 +13,22 @@
  * Log sinks (ANDROID_PORT_PLAN.md, Phase 3)
  * ===========================================================================
  *
- * Two ready-made sinks for ipa_log_set_sink():
+ * Two ready-made sinks:
  *
  *   - the rotating-file sink, for the daemon, which has nowhere to write
  *     stderr to and must not fill the device's flash;
  *   - the ring-buffer sink, for the APK, whose UI tails the log live.
  *
- * Both install themselves on init and restore the stderr default on free, so
- * a front-end never has to call ipa_log_set_sink() itself.  Both are safe to
- * call from several threads: the IPAd's poll loop runs on its own thread
+ * Both install themselves on init (ipa_log_add_sink) and remove themselves on
+ * free, so a front-end never has to touch the sink API itself.  Both are safe
+ * to call from several threads: the IPAd's poll loop runs on its own thread
  * while the UI drains the ring from another.
  *
- * Only one sink is active at a time -- installing the second one displaces
- * the first.
+ * The two coexist, and the APK needs them to: it installs the ring for its
+ * live view, and ipa_run() then installs the file sink from the configured
+ * log.path.  Every record reaches both.  A sink only ever receives records
+ * logged while it is installed, so the file starts at the moment it opens --
+ * the ring's earlier content is not replayed into it.
  */
 
 /* ---------------------------------------------------------------------------

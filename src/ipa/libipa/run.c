@@ -67,6 +67,9 @@ static void log_config(const struct ipa_run_config *rcfg)
 	IPA_LOGP(SMAIN, LINFO, "esipa_binding = %s\n",
 		 rcfg->cfg.esipa_binding == IPA_ESIPA_BINDING_JSON ? "json" : "asn1");
 	IPA_LOGP(SMAIN, LINFO, "refresh_flag = %u\n", rcfg->cfg.refresh_flag);
+	IPA_LOGP(SMAIN, LINFO, "poll_interval = %u %s (%u s; 0 = single cycle)\n", rcfg->poll_interval,
+		 rcfg->poll_interval_unit == IPA_POLL_INTERVAL_MINUTES ? "minutes" : "seconds",
+		 ipa_run_config_poll_seconds(rcfg));
 }
 
 /* The poll loop, identical in behaviour to the CLI's.  Returns 0 when the

@@ -11,6 +11,10 @@
       the fit: the cycle transfers eIM packages and profile data.
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Held only while the IPAd is looping, so the wait between poll cycles
+         elapses in real time instead of stretching whenever the terminal
+         suspends. Released as soon as the loop ends. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <!-- Android 13+: without it the foreground-service notification is dropped

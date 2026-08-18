@@ -56,6 +56,8 @@ void ipa_run_config_defaults(struct ipa_run_config *rcfg)
 	rcfg->cfg.euicc_channel = IPA_DEFAULT_CHANNEL_NUMBER;
 	rcfg->cfg.esipa_req_retries = IPA_DEFAULT_ESIPA_REQ_RETRIES;
 	rcfg->cfg.esipa_binding = IPA_ESIPA_BINDING_ASN1;
+	rcfg->poll_interval = IPA_DEFAULT_POLL_INTERVAL;
+	rcfg->poll_interval_unit = IPA_POLL_INTERVAL_SECONDS;
 	ipa_binary_from_hexstr(rcfg->cfg.tac, sizeof(rcfg->cfg.tac), IPA_DEFAULT_TAC);
 
 	rcfg->nvstate_path = cfg_strdup(IPA_DEFAULT_NVSTATE_PATH);
@@ -64,6 +66,15 @@ void ipa_run_config_defaults(struct ipa_run_config *rcfg)
 	 * explicit 0 for max_size_bytes still means "do not rotate". */
 	rcfg->log.max_size_bytes = IPA_DEFAULT_LOG_MAX_SIZE_BYTES;
 	rcfg->log.max_files = IPA_DEFAULT_LOG_MAX_FILES;
+}
+
+unsigned int ipa_run_config_poll_seconds(const struct ipa_run_config *rcfg)
+{
+	if (!rcfg)
+		return 0;
+	if (rcfg->poll_interval_unit == IPA_POLL_INTERVAL_MINUTES)
+		return rcfg->poll_interval * 60;
+	return rcfg->poll_interval;
 }
 
 void ipa_run_config_free(struct ipa_run_config *rcfg)
@@ -110,6 +121,8 @@ static const char *const known_keys[] = {
 	"one_euicc_pkg_only",	/* -1 */
 	"refresh_flag",		/* -R */
 	"esipa_binding",	/* (no flag; ASN.1 by default) */
+	"poll_interval",	/* (no flag; front-end scheduling, 0 = single run) */
+	"poll_interval_unit",	/* (no flag; "seconds" or "minutes") */
 	"log",			/* (no flag; Phase 3 rotating-file sink) */
 };
 
@@ -255,6 +268,35 @@ static int get_binding(json_t *obj, enum ipa_esipa_binding *out)
 	return 0;
 }
 
+/* The poll interval's unit.  Kept separate from the value so the number an
+ * operator typed survives a round trip through the file; ipa_run_config_poll_
+ * seconds() does the conversion where it is needed. */
+static int get_poll_unit(json_t *obj, enum ipa_poll_interval_unit *out)
+{
+	json_t *val = json_object_get(obj, "poll_interval_unit");
+	const char *str;
+
+	if (!val)
+		return 0;
+	if (!json_is_string(val)) {
+		IPA_LOGP(SMAIN, LERROR, "config: \"poll_interval_unit\" must be a string\n");
+		return -EINVAL;
+	}
+
+	str = json_string_value(val);
+	if (strcmp(str, "seconds") == 0)
+		*out = IPA_POLL_INTERVAL_SECONDS;
+	else if (strcmp(str, "minutes") == 0)
+		*out = IPA_POLL_INTERVAL_MINUTES;
+	else {
+		IPA_LOGP(SMAIN, LERROR,
+			 "config: \"poll_interval_unit\" must be \"seconds\" or \"minutes\", got \"%s\"\n", str);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 /* The "log" object (Phase 3).  Parsed and validated now so a daemon does not
  * discover a bad log configuration only once the sink is wired up. */
 static int get_log(json_t *obj, struct ipa_run_config *rcfg)
@@ -377,6 +419,28 @@ struct ipa_run_config *ipa_config_json_parse(const char *json, size_t json_len)
 
 	if (get_binding(obj, &rcfg->cfg.esipa_binding) < 0)
 		goto err;
+
+	/* The unit is read first so the bound on the value is expressed in it:
+	 * 86400 seconds and 1440 minutes are the same ceiling. */
+	if (get_poll_unit(obj, &rcfg->poll_interval_unit) < 0)
+		goto err;
+	num = rcfg->poll_interval;
+	if (get_uint(obj, "", "poll_interval",
+		     rcfg->poll_interval_unit == IPA_POLL_INTERVAL_MINUTES ?
+			     IPA_MAX_POLL_INTERVAL_SECONDS / 60 : IPA_MAX_POLL_INTERVAL_SECONDS,
+		     &num) < 0)
+		goto err;
+	rcfg->poll_interval = (unsigned int)num;
+
+	/* 0 means "do not repeat" and stays legal; a positive interval shorter
+	 * than the floor is a mistake worth refusing rather than rounding up
+	 * silently.  Minutes cannot trip this -- one minute is already well
+	 * above the floor. */
+	if (rcfg->poll_interval > 0 && ipa_run_config_poll_seconds(rcfg) < IPA_MIN_POLL_INTERVAL_SECONDS) {
+		IPA_LOGP(SMAIN, LERROR, "config: \"poll_interval\" must be 0 or at least %u seconds, got %u\n",
+			 IPA_MIN_POLL_INTERVAL_SECONDS, rcfg->poll_interval);
+		goto err;
+	}
 	if (get_log(obj, rcfg) < 0)
 		goto err;
 

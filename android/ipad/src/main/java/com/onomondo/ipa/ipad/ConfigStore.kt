@@ -56,6 +56,11 @@ class ConfigStore(context: Context) {
         put("esipa_binding", "asn1")
         put("iot_euicc_emu_enabled", false)
         put("refresh_flag", false)
+        // 0 = one poll cycle per Start, which is what the IPAd did before the
+        // interval existed. IpadService reads these two keys; the native side
+        // accepts them for the ipad(8) daemon's benefit.
+        put(KEY_INTERVAL, DEFAULT_INTERVAL)
+        put(KEY_INTERVAL_UNIT, UNIT_SECONDS)
         put("log", JSONObject().apply {
             put("path", logPath)
             put("max_size_bytes", DEFAULT_LOG_MAX_SIZE)
@@ -75,10 +80,47 @@ class ConfigStore(context: Context) {
 
     fun rawText(): String = if (file.exists()) file.readText() else ""
 
+    /**
+     * The configured interval in seconds, or 0 for "one cycle per Start".
+     *
+     * Mirrors `ipa_run_config_poll_seconds()`: the value is stored in the unit
+     * the operator chose so the settings screen can show it back unchanged, and
+     * only converted where a duration is actually needed. A file edited by hand
+     * into something unparseable falls back to a single cycle rather than
+     * throwing — the native parser is what reports bad configuration, and it
+     * will refuse the same file a moment later with a precise message.
+     */
+    fun pollIntervalSeconds(): Long = try {
+        val config = load()
+        val value = config.optLong(KEY_INTERVAL, DEFAULT_INTERVAL.toLong())
+        val unit = config.optString(KEY_INTERVAL_UNIT, UNIT_SECONDS)
+        when {
+            value <= 0L -> 0L
+            unit == UNIT_MINUTES -> value * 60L
+            else -> value
+        }
+    } catch (e: Exception) {
+        0L
+    }
+
     companion object {
         const val DEFAULT_TAC = "12345678"
         const val DEFAULT_RETRIES = 3
         const val DEFAULT_LOG_MAX_SIZE = 262144L
         const val DEFAULT_LOG_MAX_FILES = 5
+
+        const val KEY_INTERVAL = "poll_interval"
+        const val KEY_INTERVAL_UNIT = "poll_interval_unit"
+        const val UNIT_SECONDS = "seconds"
+        const val UNIT_MINUTES = "minutes"
+        /** What the app seeds a fresh config with: repeat every 15 seconds. */
+        const val DEFAULT_INTERVAL = 15
+
+        /** Same floor the native parser enforces; 0 ("do not repeat") is exempt. */
+        const val MIN_INTERVAL_SECONDS = 5
+
+        /** Same ceiling the native parser enforces (24 h), in each unit. */
+        const val MAX_INTERVAL_SECONDS = 24 * 60 * 60
+        const val MAX_INTERVAL_MINUTES = 24 * 60
     }
 }

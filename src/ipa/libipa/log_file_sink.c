@@ -145,7 +145,7 @@ int ipa_log_file_sink_init(const char *path, size_t max_size_bytes, unsigned int
 	file_sink.cur_size = (size_t)size;
 	pthread_mutex_unlock(&file_sink.lock);
 
-	ipa_log_set_sink(file_sink_write);
+	ipa_log_add_sink(file_sink_write);
 	return 0;
 }
 
@@ -164,5 +164,5 @@ void ipa_log_file_sink_free(void)
 
 	pthread_mutex_unlock(&file_sink.lock);
 
-	ipa_log_set_sink(NULL);
+	ipa_log_del_sink(file_sink_write);
 }

@@ -112,7 +112,7 @@ int ipa_log_ring_sink_init(size_t capacity_bytes)
 	ring.size = 0;
 	pthread_mutex_unlock(&ring.lock);
 
-	ipa_log_set_sink(ring_sink_write);
+	ipa_log_add_sink(ring_sink_write);
 	return 0;
 }
 
@@ -126,7 +126,7 @@ void ipa_log_ring_sink_free(void)
 	ring.size = 0;
 	pthread_mutex_unlock(&ring.lock);
 
-	ipa_log_set_sink(NULL);
+	ipa_log_del_sink(ring_sink_write);
 }
 
 size_t ipa_log_ring_sink_avail(void)

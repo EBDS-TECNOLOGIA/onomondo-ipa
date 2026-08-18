@@ -11,8 +11,8 @@ import android.util.Log
 import br.com.tectoy.dal.HardwareServiceListenerSP
 import br.com.tectoy.dal.SPIDal
 import br.com.tectoylib.tectoysallmodules.TectoyUser
-import com.onomondo.ipa.spike.DeviceProfile
-import com.onomondo.ipa.spike.DeviceProfileProvider
+import com.onomondo.ipa.DeviceProfile
+import com.onomondo.ipa.DeviceProfileProvider
 
 /**
  * Application for the Tectoy POS build. Its only jobs are to boot the Tectoy

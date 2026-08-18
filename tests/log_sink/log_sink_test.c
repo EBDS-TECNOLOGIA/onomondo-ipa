@@ -380,27 +380,78 @@ static void ring_sink_threaded_test(void)
 	ipa_log_ring_sink_free();
 }
 
-/* Installing one sink displaces the other; freeing restores stderr. */
-static void sink_switching_test(void)
+/* The file sink and the ring sink coexist: this is what the APK needs, since
+ * ipa_run() installs the rotating log file while the UI is already draining the
+ * ring for its live view.  Regression test -- these two used to displace each
+ * other, which silently blanked the app's log window. */
+static void sink_coexist_test(void)
 {
-	TMP_PATH(path, "switch.log");
+	TMP_PATH(path, "coexist.log");
 	char out[1024];
+	char *content;
 
-	printf("sink_switching_test\n");
+	printf("sink_coexist_test\n");
 
 	assert(ipa_log_ring_sink_init(1024) == 0);
-	IPA_LOGP(SMAIN, LINFO, "to the ring\n");
+	IPA_LOGP(SMAIN, LINFO, "ring only\n");
 
 	assert(ipa_log_file_sink_init(path, 0, 2) == 0);
-	IPA_LOGP(SMAIN, LINFO, "to the file\n");
+	IPA_LOGP(SMAIN, LINFO, "to both\n");
 
-	/* The ring kept what it had and received nothing after being displaced. */
+	/* The ring kept its earlier record and still receives new ones. */
 	ipa_log_ring_sink_read(out, sizeof(out));
-	assert(strstr(out, "to the ring\n"));
-	assert(!strstr(out, "to the file\n"));
+	assert(strstr(out, "ring only\n"));
+	assert(strstr(out, "to both\n"));
 
+	/* The file has only what was logged after it was installed. */
+	content = read_file(path);
+	assert(content);
+	assert(strstr(content, "to both\n"));
+	assert(!strstr(content, "ring only\n"));
+	free(content);
+
+	/* Dropping the file sink leaves the ring installed and working. */
 	ipa_log_file_sink_free();
+	IPA_LOGP(SMAIN, LINFO, "ring again\n");
+	ipa_log_ring_sink_read(out, sizeof(out));
+	assert(strstr(out, "ring again\n"));
+
+	content = read_file(path);
+	assert(content);
+	assert(!strstr(content, "ring again\n"));
+	free(content);
+
 	ipa_log_ring_sink_free();
+}
+
+/* ipa_log_set_sink() keeps its "replace everything" meaning, and removing a
+ * sink that was never added is harmless. */
+static void sink_set_replaces_test(void)
+{
+	TMP_PATH(path, "replaced.log");
+	char *content;
+
+	printf("sink_set_replaces_test\n");
+
+	assert(ipa_log_file_sink_init(path, 0, 2) == 0);
+	IPA_LOGP(SMAIN, LINFO, "before\n");
+
+	/* Displaces the file sink without going through its _free(). */
+	capture_len = 0;
+	ipa_log_set_sink(capture_sink);
+	IPA_LOGP(SMAIN, LINFO, "after\n");
+	assert(strstr(capture, "after\n"));
+
+	content = read_file(path);
+	assert(content);
+	assert(strstr(content, "before\n"));
+	assert(!strstr(content, "after\n"));
+	free(content);
+
+	/* The file sink is no longer installed, but freeing it must still close
+	 * the file cleanly rather than trip over the missing registration. */
+	ipa_log_file_sink_free();
+	ipa_log_set_sink(NULL);
 }
 
 int main(int argc, char **argv)
@@ -421,7 +472,8 @@ int main(int argc, char **argv)
 	ring_sink_oversized_record_test();
 	ring_sink_partial_read_test();
 	ring_sink_threaded_test();
-	sink_switching_test();
+	sink_coexist_test();
+	sink_set_replaces_test();
 
 	printf("log_sink_test: all tests passed\n");
 	return 0;

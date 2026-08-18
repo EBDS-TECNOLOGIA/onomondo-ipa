@@ -17,6 +17,10 @@
   "iot_euicc_emu_enabled": false,
   "refresh_flag": false,
 
+  "_poll_interval": "0 runs one poll cycle and stops; anything else is how long the front-end waits before the next one. Unit is \"seconds\" or \"minutes\", ceiling 24 h either way.",
+  "poll_interval": 15,
+  "poll_interval_unit": "minutes",
+
   "log": {
     "path": "/data/misc/ipa/ipa.log",
     "max_size_bytes": 262144,

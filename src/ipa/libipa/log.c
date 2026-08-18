@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <errno.h>
+#include <pthread.h>
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/utils.h>
 
@@ -54,11 +56,85 @@ static void stderr_sink(const char *line, size_t len)
 	fwrite(line, 1, len, stderr);
 }
 
-static ipa_log_sink_cb log_sink = stderr_sink;
+/* Sinks are a set, not a single slot: the APK needs the rotating-file sink and
+ * the ring-buffer sink at the same time (persistent log + live view), and
+ * whichever one installed itself second must not silently displace the first.
+ * With the set empty, records go to stderr -- the Linux CLI's behaviour, byte
+ * for byte.  Four is more than any front-end has needed; a fifth is refused
+ * loudly rather than dropped silently. */
+#define LOG_MAX_SINKS 4
+
+static ipa_log_sink_cb sinks[LOG_MAX_SINKS];
+static unsigned int num_sinks;
+static pthread_mutex_t sink_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int ipa_log_add_sink(ipa_log_sink_cb sink)
+{
+	unsigned int i;
+	int rc = 0;
+
+	if (!sink)
+		return -EINVAL;
+
+	pthread_mutex_lock(&sink_lock);
+	for (i = 0; i < num_sinks; i++) {
+		if (sinks[i] == sink)
+			goto out; /* already installed; adding twice is a no-op */
+	}
+	if (num_sinks == LOG_MAX_SINKS) {
+		rc = -ENOSPC;
+		goto out;
+	}
+	sinks[num_sinks++] = sink;
+out:
+	pthread_mutex_unlock(&sink_lock);
+	return rc;
+}
+
+void ipa_log_del_sink(ipa_log_sink_cb sink)
+{
+	unsigned int i;
+
+	pthread_mutex_lock(&sink_lock);
+	for (i = 0; i < num_sinks; i++) {
+		if (sinks[i] != sink)
+			continue;
+		memmove(&sinks[i], &sinks[i + 1], (num_sinks - i - 1) * sizeof(sinks[0]));
+		num_sinks--;
+		break;
+	}
+	pthread_mutex_unlock(&sink_lock);
+}
 
 void ipa_log_set_sink(ipa_log_sink_cb sink)
 {
-	log_sink = sink ? sink : stderr_sink;
+	pthread_mutex_lock(&sink_lock);
+	num_sinks = 0;
+	if (sink)
+		sinks[num_sinks++] = sink;
+	pthread_mutex_unlock(&sink_lock);
+}
+
+/* Dispatch a finished record.  The sink table is copied under the lock and the
+ * sinks are called outside it, so a sink is free to take its own lock (both of
+ * ours do) without ordering against this one, and a sink that logs cannot
+ * deadlock against a concurrent add/del. */
+static void log_emit(const char *line, size_t len)
+{
+	ipa_log_sink_cb local[LOG_MAX_SINKS];
+	unsigned int i, n;
+
+	pthread_mutex_lock(&sink_lock);
+	n = num_sinks;
+	memcpy(local, sinks, n * sizeof(local[0]));
+	pthread_mutex_unlock(&sink_lock);
+
+	if (!n) {
+		stderr_sink(line, len);
+		return;
+	}
+	for (i = 0; i < n; i++)
+		local[i](line, len);
 }
 
 /* Records are usually well under this; the stack buffer just avoids a malloc
@@ -123,7 +199,7 @@ void ipa_logp(uint32_t subsys, uint32_t level, const char *file, int line, const
 		}
 	}
 
-	log_sink(buf, total);
+	log_emit(buf, total);
 
 	if (buf != stack_buf)
 		free(buf);

@@ -48,6 +48,9 @@ static void defaults_test(void)
 	assert(rcfg->log.path == NULL);
 	assert(rcfg->log.max_size_bytes == IPA_DEFAULT_LOG_MAX_SIZE_BYTES);
 	assert(rcfg->log.max_files == IPA_DEFAULT_LOG_MAX_FILES);
+	assert(rcfg->poll_interval == IPA_DEFAULT_POLL_INTERVAL);
+	assert(rcfg->poll_interval_unit == IPA_POLL_INTERVAL_SECONDS);
+	assert(ipa_run_config_poll_seconds(rcfg) == 0);
 
 	ipa_run_config_free(rcfg);
 }
@@ -72,6 +75,8 @@ static void full_config_test(void)
 		"\"one_euicc_pkg_only\": true,"
 		"\"refresh_flag\": true,"
 		"\"esipa_binding\": \"json\","
+		"\"poll_interval\": 30,"
+		"\"poll_interval_unit\": \"minutes\","
 		"\"log\": {"
 			"\"path\": \"/data/ipa/ipa.log\","
 			"\"max_size_bytes\": 262144,"
@@ -101,6 +106,9 @@ static void full_config_test(void)
 	assert(rcfg->one_euicc_pkg_only == true);
 	assert(rcfg->cfg.refresh_flag == true);
 	assert(rcfg->cfg.esipa_binding == IPA_ESIPA_BINDING_JSON);
+	assert(rcfg->poll_interval == 30);
+	assert(rcfg->poll_interval_unit == IPA_POLL_INTERVAL_MINUTES);
+	assert(ipa_run_config_poll_seconds(rcfg) == 30 * 60);
 	assert(strcmp(rcfg->log.path, "/data/ipa/ipa.log") == 0);
 	assert(rcfg->log.max_size_bytes == 262144);
 	assert(rcfg->log.max_files == 5);
@@ -160,6 +168,16 @@ static void rejection_test(void)
 		"{\"tac\": \"1234567890\"}",
 		"{\"tac\": \"1234ZZ78\"}",
 		"{\"esipa_binding\": \"cbor\"}",
+		"{\"poll_interval_unit\": \"hours\"}",
+		"{\"poll_interval_unit\": 60}",
+		"{\"poll_interval\": \"30\"}",
+		"{\"poll_interval\": -1}",
+		/* the ceiling is the same 24 h whichever unit says it */
+		"{\"poll_interval\": 86401}",
+		"{\"poll_interval\": 1441, \"poll_interval_unit\": \"minutes\"}",
+		/* below the floor; 0 is still allowed, see poll_interval_test */
+		"{\"poll_interval\": 1}",
+		"{\"poll_interval\": 4}",
 	};
 	unsigned int i;
 
@@ -169,6 +187,56 @@ static void rejection_test(void)
 		printf(" rejecting: %s\n", bad[i]);
 		assert(parse(bad[i]) == NULL);
 	}
+}
+
+/* The interval is kept in the unit it was written in, and converted only on
+ * demand -- a settings screen shows "30 minutes" back, not "1800 seconds". */
+static void poll_interval_test(void)
+{
+	struct ipa_run_config *rcfg;
+
+	printf("poll_interval_test\n");
+
+	/* Seconds is the default unit, so a bare number means seconds. */
+	rcfg = parse("{\"poll_interval\": 45}");
+	assert(rcfg);
+	assert(rcfg->poll_interval == 45);
+	assert(rcfg->poll_interval_unit == IPA_POLL_INTERVAL_SECONDS);
+	assert(ipa_run_config_poll_seconds(rcfg) == 45);
+	ipa_run_config_free(rcfg);
+
+	/* Minutes are stored as written and converted on demand. */
+	rcfg = parse("{\"poll_interval\": 5, \"poll_interval_unit\": \"minutes\"}");
+	assert(rcfg);
+	assert(rcfg->poll_interval == 5);
+	assert(ipa_run_config_poll_seconds(rcfg) == 300);
+	ipa_run_config_free(rcfg);
+
+	/* Order in the file must not matter: the value's bound depends on the
+	 * unit, and the parser reads the unit first either way. */
+	rcfg = parse("{\"poll_interval_unit\": \"minutes\", \"poll_interval\": 1440}");
+	assert(rcfg);
+	assert(ipa_run_config_poll_seconds(rcfg) == IPA_MAX_POLL_INTERVAL_SECONDS);
+	ipa_run_config_free(rcfg);
+
+	/* Zero stays "one cycle and stop" whatever the unit says. */
+	rcfg = parse("{\"poll_interval\": 0, \"poll_interval_unit\": \"minutes\"}");
+	assert(rcfg);
+	assert(ipa_run_config_poll_seconds(rcfg) == 0);
+	ipa_run_config_free(rcfg);
+
+	/* The floor itself is accepted -- only what is under it is refused. */
+	rcfg = parse("{\"poll_interval\": 5}");
+	assert(rcfg);
+	assert(ipa_run_config_poll_seconds(rcfg) == IPA_MIN_POLL_INTERVAL_SECONDS);
+	ipa_run_config_free(rcfg);
+
+	/* A unit on its own is legal and changes nothing while the value is 0. */
+	rcfg = parse("{\"poll_interval_unit\": \"minutes\"}");
+	assert(rcfg);
+	assert(rcfg->poll_interval == IPA_DEFAULT_POLL_INTERVAL);
+	assert(ipa_run_config_poll_seconds(rcfg) == 0);
+	ipa_run_config_free(rcfg);
 }
 
 /* The example configuration shipped in contrib/ must stay parseable -- it is
@@ -243,6 +311,7 @@ int main(int argc, char **argv)
 	defaults_test();
 	full_config_test();
 	partial_config_test();
+	poll_interval_test();
 	rejection_test();
 	comment_key_test();
 	log_defaults_test();

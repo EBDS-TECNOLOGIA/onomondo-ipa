@@ -7,7 +7,7 @@
 package com.onomondo.ipa.device.tectoy
 
 import android.util.Log
-import com.onomondo.ipa.spike.DeviceProfile
+import com.onomondo.ipa.DeviceProfile
 
 /**
  * [DeviceProfile] for the Tectoy POS terminal.

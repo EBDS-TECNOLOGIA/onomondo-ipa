@@ -13,23 +13,26 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ipa-android-spike"
+rootProject.name = "ipa-android"
 
-// Reusable, device-agnostic eUICC spike harness (native + transport + UI).
-include ':spike'
+// Reusable, device-agnostic Android face of the native core: the eUICC
+// transport, the JNI bridge, the LPA (EuiccService) declaration, the
+// DeviceProfile seam, and libipacore.so itself. Also carries the Phase-1
+// transport diagnostic (com.onomondo.ipa.spike).
+include ':core'
 
 // The IPAd application layer: foreground service running the native poll cycle,
 // live log view, and the settings screen over the shared config.json schema.
-// Device-agnostic; builds on :spike for the transport, native lib and LPA
+// Device-agnostic; builds on :core for the transport, native lib and LPA
 // declaration. See ANDROID_PORT_PLAN.md, Phase 5.
 include ':ipad'
 
-// Minimal application that runs the spike on stock AOSP telephony -- builds and
-// installs with no proprietary dependencies. Use this to run the spike on any
-// device (including the Tectoy one, via AOSP telephony) as a baseline.
+// Minimal application with no proprietary dependencies, running on stock AOSP
+// telephony. Use this to run the IPAd (and the spike diagnostic) on any device
+// -- including the Tectoy one, via AOSP telephony -- as a baseline.
 include ':app-generic'
 
 // Device-specific application for the Tectoy POS terminal: boots the Tectoy SDK
-// and supplies a DeviceProfile, then reuses everything in :spike. All Tectoy
+// and supplies a DeviceProfile, then reuses everything in :core. All Tectoy
 // proprietary artifacts stay inside this module (see device-tectoy/README).
 include ':device-tectoy'

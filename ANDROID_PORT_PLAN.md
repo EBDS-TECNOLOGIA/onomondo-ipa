@@ -183,7 +183,7 @@ adds a native diagnostic (`Java_..._EuiccSpike_nativeRunSpike`) built into
 sends known ES10x commands (GetEID / GetEUICCInfo1 / GetEUICCInfo2), records
 every raw APDU exchange and classifies the modem's 61xx behaviour. The Gradle
 app that runs it and shows the report on screen lives in `android/`: a reusable,
-device-agnostic `:spike` library (transport + native JNI + UI + a `DeviceProfile`
+device-agnostic `:core` library (transport + native JNI + UI + a `DeviceProfile`
 seam), a dependency-free `:app-generic` application (stock AOSP telephony), and a
 `:device-tectoy` application that boots the Tectoy POS SDK and supplies its
 `DeviceProfile` — all vendor-proprietary artifacts confined to that one module.
@@ -276,6 +276,8 @@ loader now fails with a clear log line rather than starting on defaults.
 | `-1` | `one_euicc_pkg_only` | boolean |
 | `-R` | `refresh_flag` | boolean |
 | (none) | `esipa_binding` | `"asn1"` (default) or `"json"` |
+| (new) | `poll_interval` | wait between poll cycles; `0` (default when absent) = run one cycle and stop. Must be `0` or ≥ 5 s; ceiling 24 h |
+| (new) | `poll_interval_unit` | `"seconds"` (default) or `"minutes"`. Stored as the operator wrote it, converted by `ipa_run_config_poll_seconds()` |
 | (new) | `log.path` | rotating-file sink (Phase 3) |
 | (new) | `log.max_size_bytes` | rotating-file sink; max 1 GiB |
 | (new) | `log.max_files` | rotating-file sink; max 1000 |
@@ -289,8 +291,10 @@ loader now fails with a clear log line rather than starting on defaults.
 — the golden-file `compare_stderr` test still passes untouched. What landed:
 
 - `log.c` — `ipa_logp()` now formats the whole record (prefix + message) into
-  one buffer and hands it to a registered sink, instead of two `fprintf`s
-  straight to stderr. `ipa_log_set_sink(NULL)` restores the stderr default.
+  one buffer and hands it to the registered sinks, instead of two `fprintf`s
+  straight to stderr. Sinks are a *set* (`ipa_log_add_sink` /
+  `ipa_log_del_sink`, max 4); with the set empty, records go to stderr, so
+  `ipa_log_set_sink(NULL)` still restores the CLI default.
   A record longer than the 512-byte stack buffer is re-formatted on the heap
   rather than truncated. Incidental benefit: one `fwrite` per record means
   concurrent writers can no longer interleave a prefix with another thread's
@@ -304,6 +308,11 @@ loader now fails with a clear log line rather than starting on defaults.
   content **on record boundaries**, so a reader never receives the tail of a
   line whose start it never saw. `ipa_log_ring_sink_read()` is a destructive
   drain, which is what a UI that appends wants.
+- **Fixed 2026-08-18:** the sinks used to be a single slot, so the file sink
+  installed by `ipa_run()` displaced the ring sink the APK had installed for
+  its live view — the app's log window went blank after two lines and the
+  operator had no way to watch a poll cycle. Sinks are now a set; regression
+  test `sink_coexist_test` in `tests/log_sink/`.
 - `log_jni.c` (Android target only) — `nativeLogRingInit` / `nativeLogDrain` /
   `nativeLogRingFree`, plus `nativeLogFileInit` / `nativeLogFileFree`, on
   `com.onomondo.ipa.NativeBridge`. `nativeLogDrain` returns `null` on an idle
@@ -418,11 +427,106 @@ sepolicy; see `android/privileged-install/`.
 
 ## Phase 5 — APK
 
-- **Native:** the same `libipacore.so` via JNI. A `NativeBridge` (Kotlin) exposes `start(configPath)`, `stop()`, `pollLog()`.
-- **Config:** ship/generate `config.json` in app storage; a settings screen edits it against the same JSON schema.
-- **eUICC access:** `TelephonyManager` calls happen in Kotlin and are handed to native via the Phase-1 JNI channel object — as a signature/system app the `MODIFY_PHONE_STATE` grant is satisfied by the platform signature; declare it in the manifest and get the app onto the system image / signed with the platform key.
-- **UI:** a foreground `Service` runs the poll loop off the main thread; a Compose screen tails the ring-buffer sink and renders log lines live while active. Start/stop controls map to the service.
-- **Manifest/permissions:** `MODIFY_PHONE_STATE`, `FOREGROUND_SERVICE`, internet; privileged-permission allow-list entry for the system-app install.
+**Status: done (2026-08-14).** Both APKs build; the merged manifests, dex and
+packaged `.so` were verified. What landed:
+
+- **`src/ipa/android/NativeBridge.kt`** — the Kotlin face of the core, in the
+  core tree next to `EuiccChannel.kt` because the JNI symbol names encode that
+  exact package. Private `native*` declarations pinned to the C symbol names,
+  with readable public wrappers (`run`, `stop`, `drainLog`, …).
+- **`android/ipad/`** — new library module, the application layer:
+  - `IpadService` — foreground service (`dataSync`) running poll cycles on a
+    worker thread, installing the ring sink first so no log line is lost. The
+    ring is installed once per process and never freed: the UI drains it every
+    500 ms, so freeing it when the service stops discarded the tail of the run
+    (fixed 2026-08-18).
+    `ACTION_START` repeats on `poll_interval`; `ACTION_RUN_ONCE` runs a single
+    cycle. A failed cycle does not end the loop (an unreachable eIM is usually
+    temporary), and the wait is what stops a persistent failure becoming a busy
+    loop. A partial wake lock is held while looping, because `Object.wait()`
+    counts uptime, not elapsed real time.
+  - `IpadActivity` — Start / Run once / Stop, plus a live log tail polled from
+    `NativeBridge.drainLog()` every 500 ms, with a copy-to-clipboard button.
+  - `SettingsActivity` + `ConfigStore` — edit the *same* `config.json` the
+    native parser reads.
+- **`android/app-generic`, `android/device-tectoy`** — both now host `:ipad`
+  (which pulls `:core` transitively). `IpadActivity` is the launcher; the
+  Phase-1 `SpikeActivity` stays installed as a diagnostic, off the launcher.
+
+### Poll interval (added 2026-08-18)
+
+The core stays run-to-completion; repeating is the front-end's job, so the
+interval lives in the configuration and each front-end reads it:
+
+- **APK** — `IpadService` re-reads it *between* cycles, so a change in Settings
+  takes effect on the next wait rather than needing a restart. **Start** loops,
+  **Run once** is the old single-cycle behaviour.
+- **`ipad`** — reads it at startup when `-i` was not given, so a deployed
+  device needs no command line at all. `-i` still wins.
+- **`ipa_run()`** — ignores it, and so does the Linux CLI's `-j`: one call is
+  one cycle, unchanged.
+
+Two bugs found on the device once it was in use, both fixed 2026-08-18:
+`logRingFree()` in `onDestroy()` threw away whatever the UI had not drained in
+the last 500 ms, so a **Run once** lost its last ~15 log lines while the log
+*file* had them all; and the worker left `STOPPING` as the last state it
+published, so after **Stop** the UI sat on "Stopping..." forever even though
+everything had unwound. The service now leaves a terminal state behind in its
+`finally` (`Stopped`, or the failure's own message).
+
+The floor of 5 s is enforced in `config_json.c` (the authority, for files
+edited by hand) and again in `SettingsActivity`, so a bad value is refused as
+it is typed instead of at the start of the next run. A cycle that reaches the
+eIM over the network takes longer than that anyway, so a shorter interval would
+only stack cycles back to back. `0` remains legal and means "do not repeat".
+The app seeds a fresh `config.json` with 15 s; a file that omits the key
+entirely still means "single cycle", which is what keeps the daemon's old
+behaviour intact.
+
+### Why the daemon is a service, not `ipad`
+
+Restated because it is the whole reason this module exists: ISD-R access needs
+`MODIFY_PHONE_STATE` **and** LPA package identity, so the process driving the
+eUICC must be this app. `contrib/android/README.md` covers both shapes.
+
+### Config: one schema, one file
+
+`SettingsActivity` edits `config.json` in place rather than shadowing it in
+SharedPreferences, and leaves keys it does not show untouched. **Validation is
+deliberately not duplicated in Kotlin** — the native parser is strict and names
+the offending key; a second copy of those rules would be a second thing to keep
+in step. Kotlin only guarantees well-formed JSON of the right types. A blank
+field removes the key, so "unset" and "empty string" stay distinct.
+
+### Deviation from the plan: Views, not Compose
+
+The plan sketched a Compose screen. The existing modules deliberately avoid even
+AppCompat so the library imposes no theme on its host — which matters on a
+locked-down POS terminal — and a live log tail plus four buttons does not
+justify the dependency. `IpadActivity` is a framework `Activity` with a
+code-built UI, matching `SpikeActivity`. Easy to revisit if a richer UI is
+wanted.
+
+### Verified on the built APKs
+
+- `libipacore.so` packaged for `armeabi-v7a`.
+- All seven `native*` declarations in the dex match the symbols exported by
+  `libipacore.so` **exactly** — this caught a real bug: the wrappers were first
+  written as `run`/`stop`/`drainLog`, which would have thrown
+  `UnsatisfiedLinkError` on first call rather than failing at load.
+- Merged manifest: `IpadActivity` (LAUNCHER), `SettingsActivity`, `IpadService`
+  (`foregroundServiceType=dataSync`), and `IpaEuiccService` guarded by
+  `BIND_EUICC_SERVICE` — the LPA declaration ISD-R access depends on.
+- Zero `android/service/euicc` class *definitions* in the dex: the `@SystemApi`
+  stubs stayed `compileOnly`.
+- `device-tectoy` keeps `TectoyApplication` as the `DeviceProfileProvider`, so
+  both the IPAd and the spike pick up the vendor slot→subId lookup.
+
+### Not done (needs the device)
+
+On-hardware validation of the app: install privileged, run a real poll cycle
+against an eIM, and confirm the live log view. The build-side checks above are
+as far as this can be taken without the terminal in hand.
 
 ---
 
@@ -444,7 +548,7 @@ sepolicy; see `android/privileged-install/`.
 - **Phase 1:** moderate–large + the one hardware-validation spike (dominant on the critical path).
 - **Phases 2–3:** done.
 - **Phase 4:** done.
-- **Phase 5:** moderate (the Android UI/service is the bulk).
+- **Phase 5:** done.
 
 The Linux/PC-SC build stays fully intact throughout — every Android change is behind `IPA_TARGET_ANDROID` or a runtime capability flag.
 
