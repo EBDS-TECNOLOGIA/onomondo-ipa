@@ -83,7 +83,7 @@ static const struct num_str_map sgp32_error_code_strings_resetAutoEnableConfigRe
 static int dec_euicc_mem_rst_res_sgp32(const struct ipa_buf *es10b_res)
 {
 	struct SGP32_EuiccMemoryResetResponse *asn = NULL;
-	int rc;
+	int rc = 0;
 
 	asn = ipa_es10x_res_dec(&asn_DEF_SGP32_EuiccMemoryResetResponse, es10b_res, "eUICCMemoryReset");
 	if (!asn)
@@ -96,7 +96,7 @@ static int dec_euicc_mem_rst_res_sgp32(const struct ipa_buf *es10b_res)
 								  asn->resetResult, "(unknown)"));
 		rc = -EINVAL;
 	} else {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LERROR, "function succeeded with status code %ld=%s!\n",
+		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO, "function succeeded with status code %ld=%s!\n",
 			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetResult,
 								  asn->resetResult, "(unknown)"));
 	}
@@ -108,7 +108,7 @@ static int dec_euicc_mem_rst_res_sgp32(const struct ipa_buf *es10b_res)
 								  asn->resetResult, "(unknown)"));
 		rc = -EINVAL;
 	} else {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LERROR, "function succeeded with status code %ld=%s!\n",
+		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO, "function succeeded with status code %ld=%s!\n",
 			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetEimResult,
 								  asn->resetResult, "(unknown)"));
 	}
@@ -119,7 +119,7 @@ static int dec_euicc_mem_rst_res_sgp32(const struct ipa_buf *es10b_res)
 								  asn->resetResult, "(unknown)"));
 		rc = -EINVAL;
 	} else {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LERROR, "function succeeded with status code %ld=%s!\n",
+		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO, "function succeeded with status code %ld=%s!\n",
 			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetAutoEnableConfigResult,
 								  asn->resetResult, "(unknown)"));
 	}
@@ -131,7 +131,7 @@ static int dec_euicc_mem_rst_res_sgp32(const struct ipa_buf *es10b_res)
 static int dec_euicc_mem_rst_res(const struct ipa_buf *es10b_res)
 {
 	struct EuiccMemoryResetResponse *asn = NULL;
-	int rc;
+	int rc = 0;
 
 	asn = ipa_es10x_res_dec(&asn_DEF_EuiccMemoryResetResponse, es10b_res, "eUICCMemoryReset");
 	if (!asn)
@@ -144,7 +144,7 @@ static int dec_euicc_mem_rst_res(const struct ipa_buf *es10b_res)
 								  "(unknown)"));
 		rc = -EINVAL;
 	} else {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LERROR, "function succeeded with status code %ld=%s!\n",
+		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO, "function succeeded with status code %ld=%s!\n",
 			       asn->resetResult, ipa_str_from_num(error_code_strings_resetResult, asn->resetResult,
 								  "(unknown)"));
 	}
