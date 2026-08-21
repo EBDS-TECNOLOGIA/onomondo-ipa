@@ -16,6 +16,33 @@
  *  \param[in] array array reference. */
 #define IPA_ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+#ifdef _MSC_VER
+/* MSVC has no statement expressions ({ ... }), so the two allocate-and-zero
+ * macros below cannot be written in the GNU form.  A static inline helper
+ * gives identical semantics -- allocate, assert, zero, yield the pointer --
+ * and keeps both macros usable in expression position at all 79 call sites.
+ * The GNU definitions are left untouched for every other toolchain. */
+
+/*! Allocate N bytes of memory, ensure that the allocation was successful and that the memory is initialized.
+ *  \param[in] n number of bytes to allocate.
+ *  \returns N bytes of dynamically allocated memory. */
+static inline void *ipa_alloc_n_zero(size_t n)
+{
+	void *__ptr = IPA_ALLOC_N(n);
+	assert(__ptr);
+	memset(__ptr, 0, n);
+	return __ptr;
+}
+
+#define IPA_ALLOC_N_ZERO(n) ipa_alloc_n_zero(n)
+
+/*! Allocate memory for an object, ensure that the allocation was successful and that the memory is initialized.
+ *  \param[in] obj description of the object to allocated (struct).
+ *  \returns dynamically allocated memory of the object size. */
+#define IPA_ALLOC_ZERO(obj) ((obj *)ipa_alloc_n_zero(sizeof(obj)))
+
+#else /* !_MSC_VER */
+
 /*! Allocate memory for an object, ensure that the allocation was successful and that the memory is initialized.
  *  \param[in] obj description of the object to allocated (struct).
  *  \returns dynamically allocated memory of the object size. */
@@ -37,6 +64,8 @@
 	memset(__ptr, 0, n); \
 	__ptr; \
 })
+
+#endif /* _MSC_VER */
 
 char *ipa_hexdump(const uint8_t *data, size_t len);
 

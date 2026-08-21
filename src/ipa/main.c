@@ -9,11 +9,17 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
-#include <getopt.h>
 #include <stdlib.h>
 #include <limits.h>
 #include <signal.h>
+#ifdef _WIN32
+/* getopt(), sleep(), access()/R_OK and PATH_MAX all come from here on Windows;
+ * the MS CRT has none of them.  <signal.h> exists but knows no SIGUSR1. */
+#include <onomondo/ipa/compat.h>
+#else
+#include <getopt.h>
 #include <unistd.h>
+#endif
 #include <onomondo/ipa/utils.h>
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/ipad.h>
@@ -90,7 +96,7 @@ struct ipa_buf *load_ber_from_file(char *dir, char *file)
 	/* Missing/unreadable file is an operator error, not an assertion: return
 	 * NULL so the caller can report and exit cleanly (assert is a no-op under
 	 * -DNDEBUG anyway). */
-	ber_file = fopen(path, "r");
+	ber_file = fopen(path, "rb");
 	if (!ber_file) {
 		IPA_LOGP(SMAIN, LERROR, "cannot open BER file %s\n", path);
 		return NULL;
@@ -115,7 +121,7 @@ struct ipa_buf *load_nvstate_from_file(char *path)
 	struct ipa_buf *nvstate = NULL;
 	size_t file_size;
 
-	file_ptr = fopen(path, "r");
+	file_ptr = fopen(path, "rb");
 	if (!file_ptr) {
 		IPA_LOGP(SMAIN, LERROR, "unable to load nvstate from file %s -- a new nvstate will be created.\n",
 			 path);
@@ -140,7 +146,7 @@ void save_nvstate_to_file(char *path, struct ipa_buf *nvstate)
 {
 	FILE *file_ptr = NULL;
 
-	file_ptr = fopen(path, "w");
+	file_ptr = fopen(path, "wb");
 	if (!file_ptr) {
 		IPA_LOGP(SMAIN, LERROR, "unable to save nvstate from file %s!\n", path);
 		return;
@@ -240,7 +246,9 @@ int main(int argc, char **argv)
 	enum getopt_action getopt_action = ACTION_NONE;
 	char *getopt_default_dp = NULL;
 
+#ifdef SIGUSR1
 	signal(SIGUSR1, sig_usr1);
+#endif
 
 	printf("IPAd!\n");
 

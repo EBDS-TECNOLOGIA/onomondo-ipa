@@ -52,15 +52,28 @@ platform-dependent modules that can run on a standard Linux system:
 * `http.c`: Contains a libcurl based implementation to make HTTP(s) requests.
 * `scard.c`: Contains a libpcsclite based implementation to access the eUICC.
 
+The same two modules build unmodified on Windows: libcurl is used there as
+well, and `scard.c` targets the WinSCard API that pcsc-lite clones, which
+Windows implements natively. See [WINDOWS_BUILD.md](WINDOWS_BUILD.md).
+
 On a Debian GNU/Linux system, the following packages are required:
 
 * `asn1c`
-* `libcurl4-gnutls-dev`
+* `libcurl4-openssl-dev`
 * `libpcsclite-dev`
 * `build-essential`
 * `cmake`
 
 On a Debian system, the standard `apt-get install ...` command can be used to install those dependencies.
+
+**libcurl must be built against OpenSSL, not GnuTLS.** `http.c` installs the
+TLS credentials provisioned by the eUICC (`trustedCertificateTls`,
+`trustedEimPkTls`, and the eUICC-backed client key) by reaching into the
+OpenSSL `SSL_CTX` through `CURLOPT_SSL_CTX_FUNCTION`. A GnuTLS build of
+libcurl rejects that option with `CURLE_NOT_BUILT_IN`, and those credentials
+cannot be used — `-C <cabundle>` is then the only way to trust the eIM.
+`libcurl4-gnutls-dev` and `libcurl4-openssl-dev` conflict in Debian, so this
+is an either/or choice.
 
 ### Building
 
@@ -73,6 +86,8 @@ CMake generates the libasn ASN.1 codec from `asn1/*.asn` during configure
 (requires `asn1c` in PATH) into the build tree — there is no separate regen
 step. Editing any `asn1/*.asn` and re-running `cmake --build build` re-runs asn1c and
 rebuilds; an unchanged schema is not regenerated.
+
+For a native MSVC build on Windows, see **[WINDOWS_BUILD.md](WINDOWS_BUILD.md)**.
 
 #### Options
 

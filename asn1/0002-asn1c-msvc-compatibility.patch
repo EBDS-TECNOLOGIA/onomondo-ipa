@@ -1,0 +1,77 @@
+From: EBDS Tecnologia Ltda.
+Subject: [PATCH] asn1c: make the generated codec compile with MSVC
+
+asn1c 0.9.28 predates MSVC 2010 and carries two assumptions that break a
+modern cl.exe build.  Both fixes are confined to Windows/MSVC preprocessor
+branches, so the generated tree stays byte-identical for every other
+toolchain and the patch can be applied unconditionally at generation time.
+
+1. asn_internal.h uses a bare __attribute__((unused)) on
+   ASN__STACK_OVERFLOW_CHECK instead of the GCC_NOTUSED macro that
+   asn_system.h defines exactly for this purpose (and which already expands
+   to nothing on non-GCC compilers).
+
+2. asn_system.h, under _WIN32:
+   - aliases snprintf/vsnprintf to _snprintf/_vsnprintf.  Those do not
+     NUL-terminate on truncation.  asn_system.h is included well beyond
+     libasn (libipa, ipa, the tests), so on MSVC 2015+ this would silently
+     downgrade every snprintf() in the project -- including the
+     bounds-checked path build in main.c.  Restrict the alias to the
+     toolchains that actually lack the C99 functions.
+   - typedefs int8_t..uint32_t itself, with int8_t as plain `char`.  The
+     CRT's <stdint.h> uses `signed char`, making this a hard redefinition
+     error (C2371) on MSVC 2010+.  Use the standard header there instead
+     and take ssize_t from SSIZE_T.
+---
+--- a/src/ipa/libasn/asn_internal.h
++++ b/src/ipa/libasn/asn_internal.h
+@@ -104,7 +104,7 @@
+  * Check stack against overflow, if limit is set.
+  */
+ #define	ASN__DEFAULT_STACK_MAX	(30000)
+-static int __attribute__((unused))
++static int GCC_NOTUSED
+ ASN__STACK_OVERFLOW_CHECK(asn_codec_ctx_t *ctx) {
+ 	if(ctx && ctx->max_stack_size) {
+ 
+--- a/src/ipa/libasn/asn_system.h
++++ b/src/ipa/libasn/asn_system.h
+@@ -32,8 +32,15 @@
+ #ifdef	_WIN32
+ 
+ #include <malloc.h>
++/* MSVC 2015 (_MSC_VER 1900) and later provide C99-conformant snprintf() and
++ * vsnprintf(); MinGW always did.  The legacy _snprintf/_vsnprintf do NOT
++ * NUL-terminate on truncation, so aliasing to them on a modern toolchain
++ * silently downgrades every snprintf() in the project -- asn_system.h is
++ * pulled in far beyond libasn.  Alias only where it is actually needed. */
++#if defined(_MSC_VER) && _MSC_VER < 1900
+ #define	 snprintf	_snprintf
+ #define	 vsnprintf	_vsnprintf
++#endif
+ 
+ /* To avoid linking with ws2_32.lib, here's the definition of ntohl() */
+ #define sys_ntohl(l)	((((l) << 24)  & 0xff000000)	\
+@@ -45,6 +52,22 @@
+ #ifndef __cplusplus
+ #define inline __inline
+ #endif
++#if _MSC_VER >= 1600
++/* MSVC 2010 and later ship a C99 <stdint.h>.  The legacy typedefs below would
++ * collide with it -- int8_t as plain `char` against the CRT's `signed char` is
++ * a hard redefinition error (C2371) -- so take the standard header instead and
++ * get ssize_t from SSIZE_T in <BaseTsd.h>. */
++#include <stdint.h>
++#include <BaseTsd.h>
++#ifndef	_SSIZE_T_DEFINED
++#define	_SSIZE_T_DEFINED
++typedef SSIZE_T ssize_t;
++#endif
++#ifndef	ASSUMESTDTYPES
++#define	ASSUMESTDTYPES	1
++#endif
++#endif	/* _MSC_VER >= 1600 */
++
+ #ifndef	ASSUMESTDTYPES	/* Standard types have been defined elsewhere */
+ #define	ssize_t		SSIZE_T
+ typedef	char		int8_t;

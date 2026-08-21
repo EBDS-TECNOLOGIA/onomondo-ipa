@@ -25,7 +25,7 @@ void ipa_bpp_segments_encode_test(char *test_vector_path)
 
 	/* Load test BPP test vector from file */
 	assert(test_vector_path);
-	bpp_file = fopen(test_vector_path, "r");
+	bpp_file = fopen(test_vector_path, "rb");	/* binary: text mode mangles this on Windows */
 	assert(bpp_file);
 	bpp_len = fread(&bpp, sizeof(char), sizeof(bpp), bpp_file);
 	fclose(bpp_file);

@@ -1,0 +1,25 @@
+# Line-ending and binary policy.
+#
+# A Windows checkout with core.autocrlf=true rewrites text files on the way to
+# the working tree.  For most sources that is harmless, but a few file kinds
+# here are broken by it, so pin them explicitly.
+
+# Binary fixtures: BER blobs and serialised nvstate.  A CRLF rewrite silently
+# corrupts these, and the tests that read them fail in confusing ways.
+*.ber   binary
+*.bin   binary
+
+# `patch` matches context lines literally.  CRLF in a patch, or in the file the
+# patch targets, makes every hunk fail -- and asn1/*.patch is applied on every
+# build that regenerates the codec.
+*.patch text eol=lf
+
+# The codec generator runs under bash (MSYS2 on Windows).  A CRLF shebang line
+# is not recognised.
+*.sh    text eol=lf
+
+# Golden test output.  The comparison uses `cmake -E compare_files --ignore-eol`
+# so either ending passes, but keeping LF keeps diffs quiet across platforms.
+*.ok    text eol=lf
+*.err   text eol=lf
+*.pem   text eol=lf

@@ -5,12 +5,18 @@ with an in-progress port from SGP.32 v1.0 to **v1.2**.  The build works
 end-to-end and the existing test suite passes; see [MIGRATION_STATUS.md](MIGRATION_STATUS.md)
 for the full state.
 
+> Building on **Windows** (native MSVC, CLI only)? See
+> **[WINDOWS_BUILD.md](WINDOWS_BUILD.md)**. The rest of this document applies
+> unchanged once it is built.
+
 ## Build — Linux with `asn1c` 0.9.28+ and the usual deps
 
 On Debian/Ubuntu:
 
 ```bash
-sudo apt install asn1c build-essential cmake libcurl4-gnutls-dev libpcsclite-dev
+# libcurl4-openssl-dev, not -gnutls-dev: http.c needs CURLOPT_SSL_CTX_FUNCTION
+# to install the eUICC's TLS credentials, and only the OpenSSL build has it.
+sudo apt install asn1c build-essential cmake libcurl4-openssl-dev libpcsclite-dev libjansson-dev
 cmake -S . -B build -DENABLE_SANITIZE=ON -DSHOW_ASN_OUTPUT=ON
 cmake --build build --parallel
 ```

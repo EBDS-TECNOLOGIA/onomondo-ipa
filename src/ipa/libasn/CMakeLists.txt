@@ -22,10 +22,8 @@ add_library(libasn STATIC ${LIBASN_SOURCES})
 # headers as SYSTEM includes so they stay quiet in the hand-written targets
 # (libipa, ipa, the tests) that include them too.  Warnings in our own code
 # remain visible: only libasn is exempted.
-target_compile_options(libasn PRIVATE -w)
+target_compile_options(libasn PRIVATE ${IPA_C_NOWARN})
 target_include_directories(libasn PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(libasn SYSTEM PUBLIC ${LIBASN_GEN_DIR})
 
-if (M32)
-  set_target_properties(libasn PROPERTIES COMPILE_FLAGS "-m32" LINK_FLAGS "-m32")
-endif()
+ipa_apply_m32(libasn)

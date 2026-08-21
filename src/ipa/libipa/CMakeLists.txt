@@ -59,17 +59,26 @@ add_library(libipa STATIC
 
 target_include_directories(libipa PUBLIC ${CMAKE_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(libipa PUBLIC libasn)
-target_compile_options(libipa PRIVATE -Wall)
+target_compile_options(libipa PRIVATE ${IPA_C_WARN})
 
 # Jansson for the v1.2 §6.4 JSON binding on ESipa.  Optional — if not found,
 # the JSON dispatcher compiles to a stub that rejects with an error, and
 # IPA_ESIPA_BINDING_ASN1 still works unchanged.
+# jansson ships a CMake package config (that is how vcpkg and its own build
+# install it); pkg-config is the POSIX-distro route and does not exist on a
+# stock Windows box.  Try the config package first, fall back to pkg-config.
+find_package(jansson CONFIG QUIET)
+if(jansson_FOUND)
+  message(STATUS "jansson found (CMake config package); ESipa JSON binding enabled")
+  target_compile_definitions(libipa PUBLIC IPA_HAVE_JANSSON=1)
+  target_link_libraries(libipa PUBLIC jansson::jansson)
+else()
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
   pkg_check_modules(JANSSON QUIET jansson)
 endif()
 if(JANSSON_FOUND)
-  message(STATUS "jansson found; ESipa JSON binding enabled")
+  message(STATUS "jansson found (pkg-config); ESipa JSON binding enabled")
   target_compile_definitions(libipa PUBLIC IPA_HAVE_JANSSON=1)
   target_include_directories(libipa PRIVATE ${JANSSON_INCLUDE_DIRS})
   target_link_libraries(libipa PUBLIC ${JANSSON_LIBRARIES})
@@ -77,6 +86,6 @@ if(JANSSON_FOUND)
 else()
   message(STATUS "jansson NOT found; ESipa JSON binding will be a compile-time stub (install libjansson-dev to enable)")
 endif()
-if (M32)
-  set_target_properties(libipa PROPERTIES COMPILE_FLAGS "-m32" LINK_FLAGS "-m32")
 endif()
+
+ipa_apply_m32(libipa)

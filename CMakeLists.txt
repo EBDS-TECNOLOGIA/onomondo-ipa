@@ -10,9 +10,11 @@ option(ASN_EMIT_DEBUG "Enable built-in debug output of asn1c" OFF)
 option(MEM_EMIT_DEBUG "Enable debug output for heap memory usage" OFF)
 option(M32 "Compile for 32 bit mode" OFF)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(IpaCompilerFlags)
+
 if (ENABLE_SANITIZE)
-  add_compile_options(-fsanitize=address)
-  add_link_options(-fsanitize=address)
+  ipa_enable_sanitizer()
 endif()
 
 if(SHOW_ASN_OUTPUT)
@@ -32,7 +34,9 @@ endif()
 # asn1c expects and every translation unit that includes asn_system.h warns.
 # asn_system.h is pulled in well beyond libasn (libipa, ipa, the tests), so this
 # has to be defined for the whole project rather than per-target.
-add_compile_definitions(_DEFAULT_SOURCE)
+if(NOT MSVC)
+  add_compile_definitions(_DEFAULT_SOURCE)
+endif()
 
 # ---------------------------------------------------------------------------
 # libasn source generation (asn1c).
@@ -49,40 +53,90 @@ set(_asn_src_dir   "${CMAKE_CURRENT_SOURCE_DIR}/asn1")
 set(_gen_script    "${_asn_src_dir}/gen_libasn.sh")
 file(GLOB _asn_files "${_asn_src_dir}/*.asn")
 
-find_program(ASN1C_EXECUTABLE asn1c)
-if(NOT ASN1C_EXECUTABLE)
-  message(FATAL_ERROR
-    "asn1c not found -- install it (e.g. 'apt-get install asn1c') and re-run cmake.")
-endif()
+# Escape hatch for hosts that cannot run the generator (see below): point this
+# at a tree produced elsewhere by asn1/gen_libasn.sh and asn1c is never invoked.
+# The generated output is toolchain-independent -- the MSVC fixups live in
+# 0002-asn1c-msvc-compatibility.patch and are applied unconditionally -- so a
+# tree generated on Linux is directly usable on Windows.
+set(IPA_LIBASN_GEN_DIR "" CACHE PATH
+  "Pre-generated asn1c output tree to build instead of running asn1c")
 
-# Re-run cmake when a schema or the generator changes, so the staleness check
-# below and the source glob in src/ipa/libasn/CMakeLists.txt re-evaluate.  This
-# is what lets plain `make` pick up an edited .asn with no manual regen step.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  ${_asn_files} "${_gen_script}")
-
-set(_need_gen FALSE)
-if(NOT EXISTS "${_libasn_stamp}")
-  set(_need_gen TRUE)  # never generated (e.g. a fresh checkout)
-else()
-  foreach(_f ${_asn_files} "${_gen_script}")
-    if("${_f}" IS_NEWER_THAN "${_libasn_stamp}")
-      set(_need_gen TRUE)  # a schema / the generator changed
+if(IPA_LIBASN_GEN_DIR)
+  file(GLOB _pregen_sources "${IPA_LIBASN_GEN_DIR}/*.c")
+  if(NOT _pregen_sources)
+    message(FATAL_ERROR
+      "IPA_LIBASN_GEN_DIR is set to '${IPA_LIBASN_GEN_DIR}' but there are no "
+      ".c files there.  Generate one with:\n"
+      "  bash asn1/gen_libasn.sh $(command -v asn1c) ./asn1 <out_dir>")
+  endif()
+  set(LIBASN_GEN_DIR "${IPA_LIBASN_GEN_DIR}")
+  list(LENGTH _pregen_sources _pregen_count)
+  message(STATUS "libasn: using pre-generated codec (${_pregen_count} sources) "
+                 "from ${LIBASN_GEN_DIR}")
+  # Schema edits cannot be picked up automatically in this mode; say so once
+  # rather than silently building a stale codec.
+  foreach(_f ${_asn_files})
+    if("${_f}" IS_NEWER_THAN "${LIBASN_GEN_DIR}")
+      message(WARNING
+        "libasn: ${_f} is newer than the pre-generated tree in "
+        "${LIBASN_GEN_DIR}.  Regenerate it, or unset IPA_LIBASN_GEN_DIR to "
+        "let cmake run asn1c.")
+      break()
     endif()
   endforeach()
-endif()
-
-if(_need_gen)
-  message(STATUS "libasn: generating ASN.1 codec with ${ASN1C_EXECUTABLE}")
-  execute_process(
-    COMMAND bash "${_gen_script}" "${ASN1C_EXECUTABLE}" "${_asn_src_dir}" "${LIBASN_GEN_DIR}"
-    RESULT_VARIABLE _gen_rc)
-  if(NOT _gen_rc EQUAL 0)
-    message(FATAL_ERROR "libasn generation failed (exit ${_gen_rc})")
-  endif()
-  file(TOUCH "${_libasn_stamp}")
 else()
-  message(STATUS "libasn: generated codec is up to date")
+  # asn1c is a POSIX program with no native Windows build.  On Windows it is
+  # reached through MSYS2, which also supplies the bash/patch/sed the generator
+  # script needs.  Nothing MSYS2 provides ends up in the built binary -- asn1c
+  # only emits C, which MSVC then compiles -- so this is a build-time tool
+  # dependency in the same category as Perl for OpenSSL, not a runtime layer.
+  find_program(ASN1C_EXECUTABLE asn1c)
+  find_program(BASH_EXECUTABLE bash)
+  if(NOT ASN1C_EXECUTABLE OR NOT BASH_EXECUTABLE)
+    if(WIN32)
+      message(FATAL_ERROR
+        "libasn: the ASN.1 codec generator is not available.\n"
+        "  asn1c: ${ASN1C_EXECUTABLE}\n"
+        "  bash:  ${BASH_EXECUTABLE}\n"
+        "Either install MSYS2 and build asn1c into it (see WINDOWS_BUILD.md), "
+        "putting both on PATH, or build a tree elsewhere and pass "
+        "-DIPA_LIBASN_GEN_DIR=<path>.")
+    else()
+      message(FATAL_ERROR
+        "asn1c not found -- install it (e.g. 'apt-get install asn1c') and re-run cmake.")
+    endif()
+  endif()
+
+  # Re-run cmake when a schema or the generator changes, so the staleness check
+  # below and the source glob in src/ipa/libasn/CMakeLists.txt re-evaluate.  This
+  # is what lets plain `make` pick up an edited .asn with no manual regen step.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_asn_files} "${_gen_script}")
+
+  set(_need_gen FALSE)
+  if(NOT EXISTS "${_libasn_stamp}")
+    set(_need_gen TRUE)  # never generated (e.g. a fresh checkout)
+  else()
+    foreach(_f ${_asn_files} "${_gen_script}")
+      if("${_f}" IS_NEWER_THAN "${_libasn_stamp}")
+        set(_need_gen TRUE)  # a schema / the generator changed
+      endif()
+    endforeach()
+  endif()
+
+  if(_need_gen)
+    message(STATUS "libasn: generating ASN.1 codec with ${ASN1C_EXECUTABLE}")
+    execute_process(
+      COMMAND "${BASH_EXECUTABLE}" "${_gen_script}" "${ASN1C_EXECUTABLE}"
+              "${_asn_src_dir}" "${LIBASN_GEN_DIR}"
+      RESULT_VARIABLE _gen_rc)
+    if(NOT _gen_rc EQUAL 0)
+      message(FATAL_ERROR "libasn generation failed (exit ${_gen_rc})")
+    endif()
+    file(TOUCH "${_libasn_stamp}")
+  else()
+    message(STATUS "libasn: generated codec is up to date")
+  endif()
 endif()
 # ---------------------------------------------------------------------------
 

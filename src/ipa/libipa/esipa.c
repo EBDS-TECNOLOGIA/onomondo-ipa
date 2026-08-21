@@ -9,7 +9,11 @@
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
+#ifdef _WIN32
+#include <onomondo/ipa/compat.h>	/* sleep() */
+#else
 #include <unistd.h>
+#endif
 #include <onomondo/ipa/ipad.h>
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/http.h>

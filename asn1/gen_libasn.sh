@@ -32,6 +32,19 @@ if [ "$#" -ne 3 ]; then
 fi
 
 ASN1C="$1"
+
+# Under MSYS2 this script runs in a POSIX shell but asn1c is a native Win32
+# binary, so absolute paths have to reach it in Windows form (C:/...) rather
+# than the /c/... form `pwd` produces.  cygpath does that conversion and only
+# exists there; everywhere else paths pass through untouched.
+to_native() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 # Absolutise so the paths survive the `cd` into the staging dir below.
 ASN_SRC_DIR="$(cd "$2" && pwd)"
 mkdir -p "$3"
@@ -51,6 +64,7 @@ ASN_FILES=(
 )
 
 PATCH_ALLOC="${ASN_SRC_DIR}/0001-asn_internal-use-custom-memory-allocator-functions.patch"
+PATCH_MSVC="${ASN_SRC_DIR}/0002-asn1c-msvc-compatibility.patch"
 
 echo "[gen_libasn] asn1c: ${ASN1C}"
 echo "[gen_libasn] out:   ${OUT_DIR}"
@@ -67,7 +81,12 @@ if "${ASN1C}" -h 2>&1 | grep -q -- "-no-gen-example"; then
   ASN1C_FLAGS+=(-no-gen-example)
 fi
 
-( cd "${STAGING}" && "${ASN1C}" "${ASN1C_FLAGS[@]}" "${ASN_FILES[@]}" )
+ASN_FILES_NATIVE=()
+for f in "${ASN_FILES[@]}"; do
+  ASN_FILES_NATIVE+=("$(to_native "${f}")")
+done
+
+( cd "${STAGING}" && "${ASN1C}" "${ASN1C_FLAGS[@]}" "${ASN_FILES_NATIVE[@]}" )
 
 # Drop generator by-products we do not build: the automake fragments and the
 # standalone converter/sample programs (they carry their own main()).  asn1c
@@ -86,6 +105,15 @@ rm -f "${STAGING}"/Makefile.am.libasncodec "${STAGING}"/Makefile.am.sample \
 # (a/src/ipa/libasn/asn_internal.h), so strip four leading components with -p4
 # and apply inside STAGING.
 patch -p4 -d "${STAGING}" < "${PATCH_ALLOC}"
+
+# --- Patch: let the generated codec compile with MSVC ----------------------
+# asn1c 0.9.28 predates MSVC 2010: it aliases snprintf to the non-terminating
+# _snprintf and typedefs int8_t..uint32_t itself, clashing with the CRT's
+# <stdint.h>.  Every hunk sits inside a _WIN32/_MSC_VER branch, so applying
+# this unconditionally leaves the tree byte-identical for other toolchains --
+# which also means a tree generated here is directly usable on Windows via
+# IPA_LIBASN_GEN_DIR.  See asn1/0002-asn1c-msvc-compatibility.patch.
+patch -p4 -d "${STAGING}" < "${PATCH_MSVC}"
 
 # Clean up patch backups so they aren't mistaken for sources.
 find "${STAGING}" -maxdepth 1 \( -name '*.orig' -o -name '*.rej' \) -delete

@@ -18,7 +18,14 @@ target_include_directories(scard PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 target_link_libraries(http PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
-if(APPLE)
+# --- PC/SC ----------------------------------------------------------------
+# scard.c is written against the WinSCard API.  Windows implements it natively
+# in winscard.dll (the API pcsc-lite clones), so there is nothing to find: link
+# the import library and use the Windows SDK headers.  Elsewhere it comes from
+# pcsc-lite, or from the PCSC framework on macOS.
+if(WIN32)
+  set(PCSC_LIBRARY winscard)
+elseif(APPLE)
   find_path(PCSC_INCLUDE_DIR NAMES winscard.h PATHS /opt/homebrew/opt/pcsc-lite/include/PCSC)
   include_directories(include ${PCSC_INCLUDE_DIR})
   find_library(PCSC_LIBRARY PCSC)
@@ -27,15 +34,30 @@ else()
   set(PCSC_LIBRARY pcsclite)
 endif()
 
-add_executable(ipa main.c)
-set_property(TARGET ipa PROPERTY C_STANDARD 99)
-target_compile_options(ipa PRIVATE -Wall)
+# --- HTTP -----------------------------------------------------------------
+# libcurl is kept on Windows rather than swapped for WinHTTP: http.c installs
+# the eUICC-provisioned TLS credentials (trustedCertificateTls, trustedEimPkTls
+# and the eUICC-backed client key) by reaching into the OpenSSL SSL_CTX through
+# CURLOPT_SSL_CTX_FUNCTION.  Schannel exposes no equivalent hook, so a WinHTTP
+# backend would mean reimplementing SGP.32 chain validation against CryptoAPI.
+# Requiring a libcurl built against OpenSSL keeps http.c byte-identical across
+# platforms.  See WINDOWS_BUILD.md.
+find_package(CURL REQUIRED)
+
+# --- the CLI --------------------------------------------------------------
+set(IPA_SOURCES main.c)
+if(WIN32)
+  # POSIX interfaces the MS CRT does not provide; see include/onomondo/ipa/compat.h.
+  list(APPEND IPA_SOURCES compat/compat_win32.c compat/getopt_win32.c)
+endif()
+
+add_executable(ipa ${IPA_SOURCES})
+set_property(TARGET ipa PROPERTY C_STANDARD ${IPA_C_STANDARD})
+target_compile_options(ipa PRIVATE ${IPA_C_WARN})
 
 target_include_directories(ipa PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(ipa libipa http scard ${PCSC_LIBRARY} curl)
+target_link_libraries(ipa libipa http scard ${PCSC_LIBRARY} CURL::libcurl)
 
-if (M32)
-  set_target_properties(http PROPERTIES COMPILE_FLAGS "-m32" LINK_FLAGS "-m32")
-  set_target_properties(scard PROPERTIES COMPILE_FLAGS "-m32" LINK_FLAGS "-m32")
-  set_target_properties(ipa PROPERTIES COMPILE_FLAGS "-m32" LINK_FLAGS "-m32")
-endif()
+ipa_apply_m32(http)
+ipa_apply_m32(scard)
+ipa_apply_m32(ipa)
