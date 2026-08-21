@@ -28,9 +28,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.onomondo.ipa.NativeBridge
-import com.onomondo.ipa.spike.DeviceProfile
-import com.onomondo.ipa.spike.DeviceProfileProvider
-import com.onomondo.ipa.spike.GenericDeviceProfile
+import com.onomondo.ipa.DeviceProfile
+import com.onomondo.ipa.DeviceProfileProvider
+import com.onomondo.ipa.GenericDeviceProfile
 
 /**
  * Main screen: start/stop the IPAd and watch its log live
@@ -53,6 +53,7 @@ class IpadActivity : Activity() {
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
     private lateinit var startButton: Button
+    private lateinit var onceButton: Button
     private lateinit var stopButton: Button
 
     private val main = Handler(Looper.getMainLooper())
@@ -112,9 +113,14 @@ class IpadActivity : Activity() {
     }
 
     private fun refreshButtons() {
-        val running = IpadService.state == IpadService.State.RUNNING
-        startButton.isEnabled = !running
-        stopButton.isEnabled = running
+        // Sleeping between cycles is still "busy": Start would be a no-op and
+        // Stop is what ends the loop.
+        val busy = IpadService.state == IpadService.State.RUNNING ||
+            IpadService.state == IpadService.State.SLEEPING ||
+            IpadService.state == IpadService.State.STOPPING
+        startButton.isEnabled = !busy
+        onceButton.isEnabled = !busy
+        stopButton.isEnabled = busy
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -140,11 +146,23 @@ class IpadActivity : Activity() {
         }
         root.addView(statusView, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        // Two rows: running the IPAd on the first, everything else on the
+        // second. Five equal-width buttons on one row are unreadable on a POS
+        // terminal's screen.
+        val runRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val toolRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+
         startButton = Button(this).apply {
             text = "Start"
             setOnClickListener {
                 IpadService.start(this@IpadActivity)
+                refreshButtons()
+            }
+        }
+        onceButton = Button(this).apply {
+            text = "Run once"
+            setOnClickListener {
+                IpadService.runOnce(this@IpadActivity)
                 refreshButtons()
             }
         }
@@ -165,10 +183,14 @@ class IpadActivity : Activity() {
                 Toast.makeText(this@IpadActivity, "Log copied", Toast.LENGTH_SHORT).show()
             }
         }
-        listOf(startButton, stopButton, settingsButton, copyButton).forEach {
-            buttons.addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        listOf(startButton, onceButton, stopButton).forEach {
+            runRow.addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         }
-        root.addView(buttons, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        listOf(settingsButton, copyButton).forEach {
+            toolRow.addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        }
+        root.addView(runRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        root.addView(toolRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         logView = TextView(this).apply {
             typeface = Typeface.MONOSPACE
