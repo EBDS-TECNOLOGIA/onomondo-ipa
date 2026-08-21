@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.onomondo.ipa.ipad'
+    compileSdk 34
+    ndkVersion "27.3.13750724"
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 34
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    // :core carries the pieces this builds on and which are not specific to
+    // the diagnostic: the eUICC transport (EuiccChannel) and NativeBridge from
+    // the core tree, libipacore.so in jniLibs, the DeviceProfile seam, and the
+    // LPA (EuiccService) declaration plus telephony permissions that ISD-R
+    // access depends on. Depending on it avoids a second copy of any of that.
+    api project(':core')
+}

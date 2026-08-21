@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.onomondo.ipa.spike.generic'
+    compileSdk 34
+    // Use the on-disk NDK r27d (android-ndk-r27d) to strip the prebuilt
+    // libipacore.so at packaging time, instead of letting AGP fetch its own.
+    // Gradle does not compile native code here; the .so is built separately.
+    ndkVersion "27.3.13750724"
+
+    defaultConfig {
+        applicationId 'com.onomondo.ipa.spike.generic'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    // :ipad is the application layer (service + UI + settings); it pulls in
+    // :core transitively for the transport, native lib and LPA declaration.
+    // With no DeviceProfileProvider on this Application, both the IPAd and the
+    // spike use the stock-AOSP GenericDeviceProfile.
+    implementation project(':ipad')
+}

@@ -1,0 +1,52 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.onomondo.ipa.core'
+    compileSdk 34
+    // Use the on-disk NDK r27d (android-ndk-r27d) for native-lib stripping,
+    // consistent with the app modules. Gradle does not compile native code
+    // here; libipacore.so is built separately and shipped via jniLibs.
+    ndkVersion "27.3.13750724"
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 34
+        // The device under test is 32-bit ARM; the native core ships for
+        // armeabi-v7a. Add arm64-v8a here (and drop the .so in) for 64-bit gear.
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    sourceSets {
+        main {
+            // Single source of truth for the eUICC transport: the production
+            // Kotlin backend that scard_android.c calls over JNI (Phase 1),
+            // reused verbatim -- not copied -- from the core tree.
+            java.srcDirs += ['../../src/ipa/android']
+            // libipacore.so is a build artifact of the CMake/NDK build; it is
+            // dropped into src/main/jniLibs/<abi>/ and packaged into whichever
+            // application module depends on this library. Gitignored.
+        }
+    }
+}
+
+dependencies {
+    // compileOnly: system-API (@SystemApi) stubs for android.service.euicc.*,
+    // needed to subclass EuiccService (IpaEuiccService) so this package can be
+    // selected as the LPA and open the ISD-R logical channel. The real classes
+    // are in the framework at runtime, so these MUST stay compileOnly and never
+    // get packaged. See core/libs/README.md.
+    compileOnly files('libs/euicc-system-stubs.jar')
+}

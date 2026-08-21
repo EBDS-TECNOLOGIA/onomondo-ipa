@@ -1,0 +1,78 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// -----------------------------------------------------------------------------
+// Device-specific application for the Tectoy POS terminal.
+//
+// Everything proprietary to this device stays in THIS module: the Tectoy SDK
+// artifacts (AAR/JARs) live in device-tectoy/libs/ and are NOT committed --
+// copy them from the vendor SDK drop (see device-tectoy/README.md). The rest of
+// the project (:core, the native core) knows nothing about Tectoy.
+// -----------------------------------------------------------------------------
+
+android {
+    namespace 'com.onomondo.ipa.device.tectoy'
+    compileSdk 34
+    // Use the on-disk NDK r27d (android-ndk-r27d) to strip the prebuilt
+    // libipacore.so at packaging time, instead of letting AGP fetch its own.
+    // Gradle does not compile native code here; the .so is built separately.
+    ndkVersion "27.3.13750724"
+
+    defaultConfig {
+        applicationId 'com.onomondo.ipa.device.tectoy'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        // The Tectoy terminal is 32-bit ARM.
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+    // Some vendor AARs ship duplicate/native files; keep the build resilient.
+    packaging {
+        jniLibs {
+            pickFirsts += ['**/*.so']
+        }
+        resources {
+            excludes += ['META-INF/*.kotlin_module', 'META-INF/DEPENDENCIES']
+        }
+    }
+}
+
+dependencies {
+    // :ipad is the application layer; it pulls in :core transitively for the
+    // transport, native lib and LPA declaration.
+    implementation project(':ipad')
+
+    // Tectoy SDK: drop the vendor artifacts into device-tectoy/libs/.
+    // (tectoylib-*.aar, NeptuneLiteApi_*.jar, TectoyKernels*.jar, PayLib*.aar,
+    //  sunmi-library-*.aar). See device-tectoy/README.md. Gitignored.
+    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
+
+    // The Tectoy AAR is consumed as a flat file (no POM), so its AndroidX
+    // dependencies are NOT resolved transitively and must be declared here.
+    // In particular its startup ContentProvider (MyFileProvider) extends
+    // androidx.core.content.FileProvider; without androidx.core on the
+    // classpath the app crashes at launch. This mirrors the vendor demo's
+    // dependency set, which is the known-good baseline for these libraries.
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+}

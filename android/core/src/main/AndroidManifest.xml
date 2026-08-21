@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Permissions the eUICC transport needs. READ_PHONE_STATE is requested at
+      runtime (for SubscriptionManager). iccOpenLogicalChannel additionally
+      requires carrier privileges OR MODIFY_PHONE_STATE (signature|privileged);
+      the latter is only granted to system/signed apps, which is expected on a
+      locked-down POS terminal. Declared here so any consuming app inherits them.
+    -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.MODIFY_PHONE_STATE"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Lets a privileged/system install read subscription + SIM identifiers
+         without the "reportAccessDeniedToReadIdentifiers" denial. Harmless on a
+         normal install (simply not granted). -->
+    <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Held by the LPA (IpaEuiccService, below). -->
+    <uses-permission android:name="android.permission.WRITE_EMBEDDED_SUBSCRIPTIONS"
+        tools:ignore="ProtectedPermissions" />
+
+    <application>
+        <!--
+          Registers this package as an LPA (EuiccService). Android reserves
+          ISD-R logical-channel access to the package that
+          EuiccConnector.findBestComponent() picks as the best EuiccService:
+          a system app, a service guarded by BIND_EUICC_SERVICE, matching the
+          EuiccService action, highest intent-filter priority. It is a pure
+          identity check (the service is never bound). The high priority is to
+          outrank any stock LPA present on the device.
+        -->
+        <service
+            android:name="com.onomondo.ipa.IpaEuiccService"
+            android:exported="true"
+            android:permission="android.permission.BIND_EUICC_SERVICE"
+            tools:ignore="ExportedService">
+            <intent-filter android:priority="1000">
+                <action android:name="android.service.euicc.EuiccService" />
+            </intent-filter>
+        </service>
+    </application>
+
+</manifest>

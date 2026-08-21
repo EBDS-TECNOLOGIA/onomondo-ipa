@@ -1,0 +1,9 @@
+// Top-level build file for the IPA Android spike project (ANDROID_PORT_PLAN.md,
+// Phase 1 hardware spike). This project is a diagnostic harness for the native
+// core, libipacore.so; it is intentionally separate from the CMake/NDK build of
+// the .so itself (which lives in the repo root and scripts/build-android-deps.sh).
+plugins {
+    id 'com.android.application' version '8.13.2' apply false
+    id 'com.android.library' version '8.13.2' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+}
