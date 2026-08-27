@@ -71,16 +71,13 @@ prints a verdict on screen.
 
     :app-generic    Application. Runs on stock AOSP telephony with NO
                     proprietary dependencies. Build/install this on any device
-                    (including the Tectoy one, via AOSP) as a baseline.
+                    as a baseline.
 
-    :device-tectoy  Application. Device-specific build for the Tectoy POS
-                    terminal: boots the Tectoy SDK and supplies a DeviceProfile
-                    (vendor slot→subId lookup). All Tectoy-proprietary artifacts
-                    live inside this module and are gitignored. See its README.
-
-A new device = a new small application module implementing
-`DeviceProfileProvider` on its Application. The harness never imports a vendor
-library; `:device-tectoy` is the worked example of that separation.
+A device that needs vendor-specific setup = a new small application module
+implementing `DeviceProfileProvider` on its Application, with every proprietary
+artifact confined to that module. The harness itself never imports a vendor
+library: `:core`, `:ipad` and `:app-generic` fall back to `GenericDeviceProfile`
+(stock AOSP) whenever no provider is present.
 
 ## Prerequisites
 
@@ -100,21 +97,16 @@ library; `:device-tectoy` is the worked example of that separation.
       cp build-android-armv7/src/ipa/libipacore.so \
          android/core/src/main/jniLibs/armeabi-v7a/libipacore.so
 
-  The Tectoy terminal is 32-bit (`armeabi-v7a`). Add `arm64-v8a` similarly for
-  64-bit gear (and to `abiFilters`).
+  The terminal used for bring-up is 32-bit (`armeabi-v7a`), which is what the
+  Gradle modules filter for. Add `arm64-v8a` similarly for 64-bit gear (and to
+  `abiFilters`).
 
 - Android SDK + JDK 17. Gradle is vendored (`./gradlew`, Gradle 8.13, AGP 8.13.2).
-- For `:device-tectoy`, the vendor SDK artifacts — see `device-tectoy/README.md`.
 
 ## Build & install
 
-    # Generic (no proprietary deps) — quickest path to a running spike:
     ./gradlew :app-generic:assembleDebug
     adb install -r app-generic/build/outputs/apk/debug/app-generic-debug.apk
-
-    # Tectoy-integrated (after dropping vendor artifacts into device-tectoy/libs/):
-    ./gradlew :device-tectoy:assembleDebug
-    adb install -r device-tectoy/build/outputs/apk/debug/device-tectoy-debug.apk
 
 Launch **IPA eUICC Spike**, set the SIM slot, tap **Run eUICC spike**, read the
 report (and **Copy report** to pull it off the device).

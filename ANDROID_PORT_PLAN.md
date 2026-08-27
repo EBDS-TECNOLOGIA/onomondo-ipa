@@ -128,22 +128,23 @@ same way via `CMAKE_FIND_ROOT_PATH`.
 ## Phase 1 — Android scard backend (the real work)
 
 **Status: implemented AND validated on real hardware (2026-08-13).** The Phase-1
-transport spike ran end-to-end against a Thales "GTO" SGP.32 eUICC on the Tectoy
-POS terminal (armeabi-v7a): ES10c GetEID / ES10b GetEUICCInfo1 / GetEUICCInfo2 all
-succeeded (real EID + EUICCInfo2 with a test-profile label returned). **Result on
-the gating risk (positive):** the modem EXPOSES ISO 61xx chaining — STORE DATA
-returns `61xx` and `GET RESPONSE` over the logical channel assembles the full body,
-so the core's own `recv_es10x_block` loop is viable as-is; the modem does NOT
-auto-assemble. **Key finding:** the transport MUST send TERMINAL CAPABILITY on the
-basic channel (`iccTransmitApduBasicChannel`, `80 AA 00 00 05 A9 03 84 01 01`)
-during channel setup — a phone modem's power-on TERMINAL CAPABILITY did not
-advertise device-LPA support and the eUICC rejected all ES10 with SW=6985 until it
-was re-sent (now done in `EuiccChannel.openChannel`). **Access model finding:**
-ISD-R access on Android is reserved for the LPA (`iccOpenLogicalChannel` identity
-check vs `EuiccConnector.findBestComponent`), so the app had to register a stub
-`EuiccService` and be installed as a privileged system app; see `android/` and
-`android/privileged-install/`. Remaining owed: proactive REFRESH (SW=91xx) /
-basic-channel FETCH / TERMINAL RESPONSE, which need a real profile enable/disable.
+transport spike ran end-to-end against a Thales "GTO" SGP.32 eUICC: ES10c GetEID
+/ ES10b GetEUICCInfo1 / GetEUICCInfo2 all succeeded (real EID + EUICCInfo2 with
+a test-profile label returned). **Result on the gating risk (positive):** the
+modem EXPOSES ISO 61xx chaining — STORE DATA returns `61xx` and `GET RESPONSE`
+over the logical channel assembles the full body, so the core's own
+`recv_es10x_block` loop is viable as-is; the modem does NOT auto-assemble. **Key
+finding:** the transport MUST send TERMINAL CAPABILITY on the basic channel
+(`iccTransmitApduBasicChannel`, `80 AA 00 00 05 A9 03 84 01 01`) during channel
+setup — a phone modem's power-on TERMINAL CAPABILITY did not advertise
+device-LPA support and the eUICC rejected all ES10 with SW=6985 until it was
+re-sent (now done in `EuiccChannel.openChannel`). **Access model finding:**
+ISD-R access on Android is reserved for the LPA (`iccOpenLogicalChannel`
+identity check vs `EuiccConnector.findBestComponent`), so the app had to
+register a stub `EuiccService` and be installed as a privileged system app; see
+`android/` and `android/privileged-install/`. Remaining owed: proactive REFRESH
+(SW=91xx) / basic-channel FETCH / TERMINAL RESPONSE, which need a real profile
+enable/disable.
 
 What landed:
 - Core seam (`scard_manages_channel`): new `ipa_scard_manages_channel()` in the
@@ -184,9 +185,9 @@ sends known ES10x commands (GetEID / GetEUICCInfo1 / GetEUICCInfo2), records
 every raw APDU exchange and classifies the modem's 61xx behaviour. The Gradle
 app that runs it and shows the report on screen lives in `android/`: a reusable,
 device-agnostic `:core` library (transport + native JNI + UI + a `DeviceProfile`
-seam), a dependency-free `:app-generic` application (stock AOSP telephony), and a
-`:device-tectoy` application that boots the Tectoy POS SDK and supplies its
-`DeviceProfile` — all vendor-proprietary artifacts confined to that one module.
+seam) and a dependency-free `:app-generic` application (stock AOSP telephony). A
+device needing vendor-specific setup supplies its own `DeviceProfile` from an
+application module of its own, with every proprietary artifact confined there.
 The passive spike still does not exercise REFRESH (91xx) / FETCH / TERMINAL
 RESPONSE; that remains for a profile enable/disable on hardware.
 
@@ -449,9 +450,9 @@ packaged `.so` were verified. What landed:
     `NativeBridge.drainLog()` every 500 ms, with a copy-to-clipboard button.
   - `SettingsActivity` + `ConfigStore` — edit the *same* `config.json` the
     native parser reads.
-- **`android/app-generic`, `android/device-tectoy`** — both now host `:ipad`
-  (which pulls `:core` transitively). `IpadActivity` is the launcher; the
-  Phase-1 `SpikeActivity` stays installed as a diagnostic, off the launcher.
+- **`android/app-generic`** — now hosts `:ipad` (which pulls `:core`
+  transitively). `IpadActivity` is the launcher; the Phase-1 `SpikeActivity`
+  stays installed as a diagnostic, off the launcher.
 
 ### Poll interval (added 2026-08-18)
 
@@ -519,8 +520,6 @@ wanted.
   `BIND_EUICC_SERVICE` — the LPA declaration ISD-R access depends on.
 - Zero `android/service/euicc` class *definitions* in the dex: the `@SystemApi`
   stubs stayed `compileOnly`.
-- `device-tectoy` keeps `TectoyApplication` as the `DeviceProfileProvider`, so
-  both the IPAd and the spike pick up the vendor slot→subId lookup.
 
 ### Not done (needs the device)
 

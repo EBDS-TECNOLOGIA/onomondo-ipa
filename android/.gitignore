@@ -8,8 +8,4 @@ local.properties
 
 # Native artifact of the CMake/NDK build (produced by scripts/build-android-deps.sh
 # + the top-level cmake build, then copied in). Not source; do not commit.
-spike/src/main/jniLibs/**/libipacore.so
-
-# Device-specific proprietary SDK artifacts (see device-tectoy/README.md).
-# These are vendor-licensed and must not be committed to this repo.
-device-tectoy/libs/
+core/src/main/jniLibs/**/libipacore.so

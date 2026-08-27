@@ -29,10 +29,7 @@ include ':ipad'
 
 // Minimal application with no proprietary dependencies, running on stock AOSP
 // telephony. Use this to run the IPAd (and the spike diagnostic) on any device
-// -- including the Tectoy one, via AOSP telephony -- as a baseline.
+// as a baseline. A device that needs vendor-specific setup adds an application
+// module of its own here, implementing DeviceProfileProvider (see :core), and
+// keeps every proprietary artifact inside that module.
 include ':app-generic'
-
-// Device-specific application for the Tectoy POS terminal: boots the Tectoy SDK
-// and supplies a DeviceProfile, then reuses everything in :core. All Tectoy
-// proprietary artifacts stay inside this module (see device-tectoy/README).
-include ':device-tectoy'

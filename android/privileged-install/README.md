@@ -6,8 +6,7 @@ The IPA needs two things the Android framework only gives to a system app:
 gets neither, no matter how many permissions you grant by hand — "debuggable"
 is not "privileged".
 
-This is the procedure that was used to bring up the Tectoy POS terminal.
-Re-run it per device.
+Re-run this procedure per device.
 
 ## Before you start: is this device even eligible?
 
@@ -86,22 +85,21 @@ vendor app already in that directory:
 that PackageManager will not read, and the failure looks like the app simply
 not existing after reboot.
 
-Install `app-generic`, not `device-tectoy`.
+Install `app-generic`.
 
-> **`device-tectoy` as a priv-app will not boot with this allowlist.** Its
-> applicationId is `com.onomondo.ipa.device.tectoy`, which the XML does not
-> name, and the vendor AAR merges 56 permissions -- roughly half of them
+> **An application module carrying a vendor SDK will not boot with this
+> allowlist.** The XML names `app-generic`'s applicationId and nothing else, and
+> a vendor AAR readily merges dozens of extra permissions, many of them
 > `signature|privileged` (`INSTALL_PACKAGES`, `DELETE_PACKAGES`,
 > `NETWORK_SETTINGS`, `NETWORK_STACK`, `MANAGE_PROFILE_AND_DEVICE_OWNERS`,
 > `WRITE_SECURE_SETTINGS`, `REBOOT`, `RECOVERY`, `INTERACT_ACROSS_USERS_FULL`,
 > …). Any one of them missing from the allowlist stops the boot. Recover by
 > deleting the directory (see "Recovering from a boot loop" below).
 >
-> `app-generic` exists precisely to avoid this: it needs three entries, and on
-> the Tectoy terminal it reaches the eUICC through stock AOSP telephony
-> anyway -- that is how the Phase-1 spike passed. Only go down the
-> `device-tectoy` road if you specifically need the vendor slot→subId lookup,
-> and then build the allowlist empirically (below) rather than by hand.
+> `app-generic` exists precisely to avoid this: it needs three entries, and it
+> reaches the eUICC through stock AOSP telephony anyway -- that is how the
+> Phase-1 spike passed. If a device ever does need its own module, build its
+> allowlist empirically (below) rather than by hand.
 
 ### Building an allowlist for an app with many privileged permissions
 
