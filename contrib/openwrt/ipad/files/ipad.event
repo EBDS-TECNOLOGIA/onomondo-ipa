@@ -1,0 +1,39 @@
+#!/bin/sh
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Event command of the IPAd (ipad -e), called as: event EVENT RC
+#   cycle-done       a poll cycle ended normally
+#   cycle-failed     a poll cycle ended with an error (RC is negative)
+#   profile-changed  the eUICC switched profiles; the WAN link is about to drop
+#
+# Publishes the event on ubus ("ubus listen ipad"), handles profile-changed, then runs every executable in
+# /etc/ipad/hooks.d with the same arguments -- the place for board specific reactions, such as switching the APN.
+
+RUNDIR=/var/run/ipad
+CONFIG=${IPAD_CONFIG:-/etc/ipad/config.json}
+event=$1
+rc=${2:-0}
+
+case "$rc" in
+	''|*[!0-9-]*) rc=0 ;;
+esac
+
+ubus send ipad "{\"event\":\"$event\",\"rc\":$rc}" 2>/dev/null
+
+if [ "$event" = profile-changed ]; then
+	mkdir -p "$RUNDIR"
+	date +%s > "$RUNDIR/profile-changed"
+
+	for iface in $(jsonfilter -q -i "$CONFIG" -e '@.platform.restart_on_profile_change[*]' 2>/dev/null); do
+		logger -t ipad "profile changed, restarting interface $iface"
+		ifup "$iface"
+	done
+fi
+
+status=0
+for script in /etc/ipad/hooks.d/*; do
+	[ -x "$script" ] || continue
+	"$script" "$event" "$rc" || status=1
+done
+exit $status

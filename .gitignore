@@ -95,3 +95,6 @@ tests/testsuite.log
 # Application
 src/ipa/ipa
 nvstate.bin
+
+# OpenWrt SDK source tree override (see contrib/openwrt/README.md)
+contrib/openwrt/ipad/git-src

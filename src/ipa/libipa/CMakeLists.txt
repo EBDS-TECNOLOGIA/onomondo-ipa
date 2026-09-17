@@ -5,6 +5,7 @@ add_library(libipa STATIC
   activation_code.c
   bpp_segments.c
   cert.c
+  config_json.c
   device_info.c
   esipa_json.c
   es10a_get_euicc_cfg_addr.c
@@ -47,8 +48,11 @@ add_library(libipa STATIC
   esipa_init_auth.c
   esipa_prvde_eim_pkg_rslt.c
   euicc.c
+  fileio.c
   ipad.c
   log.c
+  log_file_sink.c
+  log_ring_sink.c
   ppr.c
   proc_cmn_cancel_sess.c
   proc_cmn_mtl_auth.c
@@ -59,11 +63,24 @@ add_library(libipa STATIC
   proc_notif_delivery.c
   proc_prfle_dwnld.c
   proc_prfle_inst.c
+  run.c
   utils.c
 )
 
 target_include_directories(libipa PUBLIC ${CMAKE_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(libipa PUBLIC libasn)
+
+# The log sinks use a pthread mutex: the IPAd's poll loop logs from its own
+# thread while the APK's UI drains the ring buffer from another.  On Android
+# and on modern glibc pthreads live in libc, so this usually resolves to
+# nothing at all.
+find_package(Threads REQUIRED)
+target_link_libraries(libipa PUBLIC Threads::Threads)
+
+# syslog sink (onomondo/ipa/log_syslog.h), for daemons on POSIX hosts.
+if(UNIX)
+  target_sources(libipa PRIVATE log_syslog_sink.c)
+endif()
 target_compile_options(libipa PRIVATE -Wall)
 
 # The IoT eUICC emulation (see the top-level CMakeLists.txt).  PUBLIC because the sample application, the tests and
@@ -79,14 +96,42 @@ if(ESIPA_BINDING_ASN1)
   target_compile_definitions(libipa PUBLIC IPA_HAVE_ESIPA_ASN1=1)
 endif()
 
+# jansson serves two consumers: the ESipa JSON binding and the JSON configuration file read by ipa_run() (see
+# onomondo/ipa/config_json.h).  It is probed once for both.  The configuration file is optional -- without jansson
+# ipa_config_json_load() fails loudly -- so only the binding turns a missing jansson into a configure error.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(JANSSON QUIET jansson)
+endif()
+# Fallback probe: pkg-config is not installed everywhere (and never under the
+# NDK toolchain), so look for the header and the library directly before
+# concluding that jansson is missing.  Under a cross toolchain these searches
+# stay inside the sysroot (CMAKE_FIND_ROOT_PATH_MODE_INCLUDE/LIBRARY = ONLY),
+# so they cannot pick up the host copy -- for Android the integrator supplies
+# jansson for the target ABI the same way as BoringSSL and libcurl.
+if(NOT JANSSON_FOUND)
+  find_path(JANSSON_INCLUDE_DIR NAMES jansson.h)
+  find_library(JANSSON_LIBRARY NAMES jansson)
+  if(JANSSON_INCLUDE_DIR AND JANSSON_LIBRARY)
+    set(JANSSON_FOUND TRUE)
+    set(JANSSON_INCLUDE_DIRS ${JANSSON_INCLUDE_DIR})
+    set(JANSSON_LIBRARIES ${JANSSON_LIBRARY})
+  endif()
+endif()
+if(JANSSON_FOUND)
+  message(STATUS "jansson found; JSON configuration file supported")
+  target_compile_definitions(libipa PRIVATE IPA_HAVE_JANSSON=1)
+  target_include_directories(libipa PRIVATE ${JANSSON_INCLUDE_DIRS})
+  target_link_libraries(libipa PUBLIC ${JANSSON_LIBRARIES})
+  target_link_directories(libipa PUBLIC ${JANSSON_LIBRARY_DIRS})
+else()
+  message(STATUS "jansson not found; JSON configuration file NOT supported")
+endif()
+
 # The JSON binding needs jansson.  ESIPA_BINDING_JSON is ON by default, and when it is on the dependency is a hard
 # requirement: silently degrading to an ASN.1-only library because the build host happened not to have
 # libjansson-dev is how two machines end up producing two different libipa from the same source.
 if(ESIPA_BINDING_JSON)
-  find_package(PkgConfig QUIET)
-  if(PkgConfig_FOUND)
-    pkg_check_modules(JANSSON QUIET jansson)
-  endif()
   if(NOT JANSSON_FOUND)
     message(FATAL_ERROR
       "ESipa binding JSON (section 6.4) is enabled but jansson was not found. "
@@ -95,9 +140,6 @@ if(ESIPA_BINDING_JSON)
   endif()
   message(STATUS "ESipa binding JSON (section 6.4): built (jansson ${JANSSON_VERSION})")
   target_compile_definitions(libipa PUBLIC IPA_HAVE_ESIPA_JSON=1)
-  target_include_directories(libipa PRIVATE ${JANSSON_INCLUDE_DIRS})
-  target_link_libraries(libipa PUBLIC ${JANSSON_LIBRARIES})
-  target_link_directories(libipa PUBLIC ${JANSSON_LIBRARY_DIRS})
 else()
   message(STATUS "ESipa binding JSON (section 6.4): NOT built")
 endif()

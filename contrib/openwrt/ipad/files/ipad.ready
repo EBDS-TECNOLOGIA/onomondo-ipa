@@ -1,0 +1,70 @@
+#!/bin/sh
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Readiness command of the IPAd (ipad -w). Exits 0 when a poll cycle may run now. $1 is why the daemon asks:
+# "poll" before a cycle, "profile-changed" after the eUICC switched profiles.
+#
+# Settings come from the "platform" object of the configuration ($IPAD_CONFIG, see config.json.example).
+# Checks, in order: the settle time after a profile change, the WAN, the NTP clock, and finally every executable
+# in /etc/ipad/ready.d (called with the same argument), so a board can add its own conditions.
+
+. /lib/functions.sh
+
+RUNDIR=/var/run/ipad
+CONFIG=${IPAD_CONFIG:-/etc/ipad/config.json}
+reason=${1:-poll}
+
+# platform setting $1, or $2 when the file does not set it
+setting() {
+	local v
+	v=$(jsonfilter -q -i "$CONFIG" -e "@.platform.$1" 2>/dev/null)
+	echo "${v:-$2}"
+}
+
+settle=$(setting wan_settle 30)
+require_wan=$(setting require_wan true)
+require_ntp=$(setting require_ntp true)
+wans=$(jsonfilter -q -i "$CONFIG" -e '@.platform.wan_interfaces[*]' 2>/dev/null)
+
+# After a profile change the WAN may still look up for a moment before the modem drops the old bearer, so the
+# first checks would pass too early. The event command records when the change happened.
+if [ "$reason" = profile-changed ] && [ -f "$RUNDIR/profile-changed" ]; then
+	changed=$(cat "$RUNDIR/profile-changed")
+	now=$(date +%s)
+	[ $((now - changed)) -ge "$settle" ] || exit 1
+fi
+
+if [ "$require_wan" = true ]; then
+	up=
+	if [ -n "$wans" ]; then
+		# Any of the listed interfaces (several with mwan3).
+		for wan in $wans; do
+			[ "$(ubus call "network.interface.$wan" status 2>/dev/null | jsonfilter -q -e '@.up')" = true ] &&
+				up=1 && break
+		done
+	else
+		# Any interface that is up and provides a default route.
+		ubus call network.interface dump 2>/dev/null |
+			jsonfilter -q -e '@.interface[@.up=true].route[@.target="0.0.0.0"]' \
+				-e '@.interface[@.up=true].route[@.target="::"]' | grep -q . && up=1
+	fi
+	[ -n "$up" ] || exit 1
+fi
+
+if [ "$require_ntp" = true ]; then
+	config_load system
+	ntp_enabled=
+	config_get_bool ntp_enabled ntp enabled 1
+	# With the NTP client disabled there is nothing to wait for; the clock is the operator's business then.
+	if [ "$ntp_enabled" -eq 1 ]; then
+		[ -f "$RUNDIR/ntp-synced" ] || exit 1
+	fi
+fi
+
+for script in /etc/ipad/ready.d/*; do
+	[ -x "$script" ] || continue
+	"$script" "$reason" || exit 1
+done
+
+exit 0

@@ -1,0 +1,47 @@
+#!/bin/sh /etc/rc.common
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The IPAd is configured by /etc/ipad/config.json alone, a file another program may maintain. The daemon re-reads
+# it on every poll cycle and starts a cycle by itself when it changes; see /etc/ipad/config.json.example.
+
+START=95
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/sbin/ipad
+WORKDIR=/etc/ipad
+CONFIG_JSON=$WORKDIR/config.json
+RUNDIR=/var/run/ipad
+STATUS_JSON=$RUNDIR/status.json
+
+# Log level until the configuration says otherwise ("log": {"level", "subsys_levels"}).
+LOG_LEVEL=info
+
+start_service() {
+	if [ ! -s "$CONFIG_JSON" ]; then
+		logger -t ipad "not starting: $CONFIG_JSON is missing (see $CONFIG_JSON.example)"
+		return 0
+	fi
+
+	mkdir -p "$RUNDIR"
+
+	procd_open_instance
+	procd_set_param command "$PROG" -c "$CONFIG_JSON" -D "$WORKDIR" -S "$STATUS_JSON" \
+		-w /usr/libexec/ipad/ready -e /usr/libexec/ipad/event -l "$LOG_LEVEL" -s
+	procd_set_param respawn 3600 5 0
+	# A stop may arrive in the middle of an APDU exchange or an HTTP request; give the cycle time to end cleanly.
+	procd_set_param term_timeout 30
+	procd_close_instance
+}
+
+# Re-read the configuration and poll now. The daemon also does this by itself when the file changes.
+reload_service() {
+	procd_send_signal ipad '*' HUP
+}
+
+# Poll now, without waiting for the interval (also "ubus call ipad poll").
+extra_command "poll" "Start a poll cycle now"
+poll() {
+	procd_send_signal ipad '*' USR2
+}

@@ -1,0 +1,36 @@
+{
+	"_comment": "IPAd configuration. Copy to /etc/ipad/config.json; the daemon notices changes by itself. Keys starting with _ are ignored.",
+
+	"tac": "12345678",
+	"reader_num": 0,
+	"euicc_channel": 1,
+	"_preferred_eim_id": "set to the eimId to use when the eUICC has several; absent: the first one",
+
+	"esipa_binding": "asn1",
+	"esipa_req_retries": 3,
+	"eim_disable_ssl_verif": false,
+
+	"_poll_interval": "seconds between poll cycles, at least 5; 0 runs one cycle and stops",
+	"poll_interval": 900,
+	"poll_interval_unit": "seconds",
+
+	"_nvstate_path": "relative to /etc/ipad, which is kept across sysupgrade",
+	"nvstate_path": "nvstate.bin",
+
+	"log": {
+		"level": "info",
+		"subsys_levels": { "_example": "HTTP: debug" }
+	},
+
+	"platform": {
+		"_wan_interfaces": "polling waits until one of these netifd interfaces is up; empty: until any interface provides a default route",
+		"wan_interfaces": [],
+		"require_wan": true,
+		"_require_ntp": "wait for the NTP client to synchronise the clock (ignored when the NTP client is disabled)",
+		"require_ntp": true,
+		"_wan_settle": "seconds to wait after a profile change before checking the WAN again",
+		"wan_settle": 30,
+		"_restart_on_profile_change": "run ifup on these interfaces after a profile change",
+		"restart_on_profile_change": []
+	}
+}

@@ -67,6 +67,7 @@ static void nvstate_reset(struct ipa_nvstate *nvstate)
 static struct ipa_buf *nvstate_serialize_ipa_buf(struct ipa_buf *nvstate_bin, struct ipa_buf *buf)
 {
 	struct ipa_buf *buf_ser = buf;
+	struct ipa_buf hdr;
 
 	/* To maintain the structure and consistency of the generated serialization result we must serialize something.
 	 * This means that in case we receive a null pointer as buf, we must serialize a dummy buffer */
@@ -74,7 +75,13 @@ static struct ipa_buf *nvstate_serialize_ipa_buf(struct ipa_buf *nvstate_bin, st
 		buf_ser = ipa_buf_alloc(0);
 	nvstate_bin = ipa_buf_realloc(nvstate_bin, nvstate_bin->len + buf_ser->data_len + sizeof(*buf_ser));
 	assert(nvstate_bin);
-	memcpy(nvstate_bin->data + nvstate_bin->len, buf_ser, buf_ser->data_len + sizeof(*buf_ser));
+	/* The header's data pointer is an address in this process, which the deserializer ignores. It is written as
+	 * NULL so that the same state always produces the same image: ipa_run() compares images to avoid rewriting
+	 * an unchanged nvstate on flash. */
+	hdr = *buf_ser;
+	hdr.data = NULL;
+	memcpy(nvstate_bin->data + nvstate_bin->len, &hdr, sizeof(hdr));
+	memcpy(nvstate_bin->data + nvstate_bin->len + sizeof(hdr), buf_ser->data, buf_ser->data_len);
 	nvstate_bin->len += buf_ser->data_len + sizeof(*buf_ser);
 
 	if (!buf)
@@ -85,9 +92,14 @@ static struct ipa_buf *nvstate_serialize_ipa_buf(struct ipa_buf *nvstate_bin, st
 static struct ipa_buf *nvstate_serialize(struct ipa_nvstate *nvstate)
 {
 	struct ipa_buf *nvstate_bin;
+	struct ipa_nvstate image = *nvstate;
 
-	/* serialize statically allocated struct members */
-	nvstate_bin = ipa_buf_alloc_data(sizeof(*nvstate), (uint8_t *) nvstate);
+	/* serialize statically allocated struct members. The pointer members are written as NULL, for the same
+	 * reason as the header pointers in nvstate_serialize_ipa_buf(); nvstate_deserialize() never uses them. */
+	image.iot_euicc_emu.eim_cfg_ber = NULL;
+	image.iot_euicc_emu.immediate_enable.smdp_oid = NULL;
+	image.iot_euicc_emu.immediate_enable.smdp_address = NULL;
+	nvstate_bin = ipa_buf_alloc_data(sizeof(image), (uint8_t *) &image);
 	assert(nvstate_bin);
 
 	/* serialize dynamically allocated struct members (append code for new members here) */
@@ -696,4 +708,31 @@ struct ipa_buf *ipa_free_ctx(struct ipa_context *ctx)
 	IPA_FREE(ctx);
 
 	return nvstate;
+}
+
+/*! Read the identity information a context holds, see ipa_get_ctx_info() in ipad.h. */
+int ipa_get_ctx_info(struct ipa_context *ctx, struct ipa_ctx_info *info)
+{
+	size_t i;
+
+	if (!ctx || !info)
+		return -EINVAL;
+
+	/* The public length is a separate macro because length.h is private; keep the two in step. */
+	assert(sizeof(info->eid) == sizeof(ctx->eid));
+
+	memset(info, 0, sizeof(*info));
+	memcpy(info->eid, ctx->eid, sizeof(info->eid));
+	/* ipa_init() leaves the EID all zero until GetEID has succeeded. */
+	for (i = 0; i < sizeof(info->eid); i++) {
+		if (info->eid[i]) {
+			info->eid_valid = true;
+			break;
+		}
+	}
+	info->eim_id = ctx->eim_id;
+	info->eim_fqdn = ctx->eim_fqdn;
+	info->ipa_mode = ctx->ipa_mode;
+
+	return 0;
 }

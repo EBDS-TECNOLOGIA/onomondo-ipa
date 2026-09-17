@@ -464,3 +464,30 @@ struct ipa_connectivity_params *ipa_get_connectivity_params(struct ipa_context *
 
 /*! Free a result returned by ipa_get_connectivity_params() (NULL-safe). */
 void ipa_connectivity_params_free(struct ipa_connectivity_params *p);
+
+/* NEW for the OpenWrt port: identity of the eUICC and eIM a context talks to, for status displays (a daemon's
+ * status file, a web UI). Nothing here needs the eUICC: it is what ipa_init() and eim_init() already learned. */
+
+/*! Length of an EID in bytes (SGP.22 section 4.3, 32 decimal digits). */
+#define IPA_LEN_EID_BYTES 16
+
+/*! Snapshot filled by ipa_get_ctx_info(). */
+struct ipa_ctx_info {
+	/*! EID as read by ipa_init(), valid when eid_valid is true. */
+	uint8_t eid[IPA_LEN_EID_BYTES];
+	bool eid_valid;
+
+	/*! eimId and eimFqdn of the eIM selected by eim_init(), or NULL before that. The strings belong to the
+	 *  context: copy them if they must outlive it. */
+	const char *eim_id;
+	const char *eim_fqdn;
+
+	/*! Which IPA is active, see enum ipa_mode. */
+	enum ipa_mode ipa_mode;
+};
+
+/*! Read the identity information a context holds.
+ *  \param[in] ctx pointer to ipa_context.
+ *  \param[out] info filled in on success.
+ *  \returns 0 on success, -EINVAL on a NULL argument. */
+int ipa_get_ctx_info(struct ipa_context *ctx, struct ipa_ctx_info *info);

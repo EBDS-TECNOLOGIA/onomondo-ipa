@@ -1,0 +1,10 @@
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Records that sysntpd has synchronised the clock, for /usr/libexec/ipad/ready. Stratum 16 means unsynchronised.
+
+[ "$ACTION" = stratum ] || [ "$ACTION" = step ] || return 0
+[ "$ACTION" = stratum ] && [ "$stratum" = 16 ] && return 0
+
+mkdir -p /var/run/ipad
+touch /var/run/ipad/ntp-synced

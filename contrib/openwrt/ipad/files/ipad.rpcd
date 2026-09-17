@@ -1,0 +1,102 @@
+#!/bin/sh
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# rpcd plugin: publishes the IPAd on ubus as object "ipad" (OPENWRT_PORT_ANALYSIS.md, section 7.6).
+#
+#   ubus call ipad status             the daemon's status file, plus whether the service is running
+#   ubus call ipad poll               start a poll cycle now
+#   ubus call ipad reload             re-read /etc/ipad/config.json and poll now
+#   ubus call ipad log '{"lines":N}'  the last N (default 100, at most 1000) IPAd lines from the system log
+#                                     (logd, or the file rsyslog writes when logd is not running)
+#
+# Nothing here talks to the eUICC: the daemon owns it, and this reads what the daemon wrote.
+
+. /usr/share/libubox/jshn.sh
+
+STATUS_JSON=/var/run/ipad/status.json
+# Where rsyslog writes daemon messages on a system that runs it instead of logd.
+SYSLOG_FILE=/var/log/messages
+
+service_running() {
+	local running
+	json_init
+	json_load "$(ubus call service list '{"name":"ipad"}' 2>/dev/null)" 2>/dev/null || return 1
+	json_select ipad 2>/dev/null || return 1
+	json_select instances 2>/dev/null || return 1
+	json_select instance1 2>/dev/null || return 1
+	json_get_var running running
+	[ "$running" = 1 ]
+}
+
+do_status() {
+	local running=0
+
+	service_running && running=1
+	json_init
+	if [ -s "$STATUS_JSON" ] && json_load "$(cat "$STATUS_JSON")" 2>/dev/null; then
+		:
+	else
+		json_init
+		json_add_string state unknown
+	fi
+	json_add_boolean running "$running"
+	json_dump
+}
+
+do_signal() {
+	# 12 = SIGUSR2 (poll now), 1 = SIGHUP (re-read the configuration and poll now)
+	if ubus call service signal "{\"name\":\"ipad\",\"signal\":$1}" >/dev/null 2>&1; then
+		echo '{"result":"ok"}'
+	else
+		echo '{"result":"error","error":"ipad service is not running"}'
+	fi
+}
+
+# Collected into a variable first: jshn state set inside a pipeline subshell would be lost.
+do_log() {
+	local lines line out
+
+	json_init
+	json_load "$1" 2>/dev/null
+	json_get_var lines lines
+	case "$lines" in
+		''|*[!0-9]*) lines=100 ;;
+	esac
+	[ "$lines" -gt 1000 ] && lines=1000
+
+	if ubus list log >/dev/null 2>&1; then
+		out=$(logread -e 'ipad\[' 2>/dev/null | tail -n "$lines")
+	elif [ -r "$SYSLOG_FILE" ]; then
+		out=$(grep 'ipad\[' "$SYSLOG_FILE" | tail -n "$lines")
+	else
+		echo '{"error":"no system log found"}'
+		return
+	fi
+
+	json_init
+	json_add_array lines
+	while IFS= read -r line; do
+		[ -n "$line" ] && json_add_string "" "$line"
+	done <<-EOT
+	$out
+	EOT
+	json_close_array
+	json_dump
+}
+
+case "$1" in
+list)
+	echo '{ "status": {}, "poll": {}, "reload": {}, "log": { "lines": 100 } }'
+	;;
+call)
+	read -r input
+	case "$2" in
+	status) do_status ;;
+	poll) do_signal 12 ;;
+	reload) do_signal 1 ;;
+	log) do_log "$input" ;;
+	*) echo '{"error":"unknown method"}'; exit 1 ;;
+	esac
+	;;
+esac
