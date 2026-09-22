@@ -47,6 +47,7 @@
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/log_syslog.h>
 #include <onomondo/ipa/config_json.h>
+#include <onomondo/ipa/scard_transport.h>
 #include <onomondo/ipa/run_observer.h>
 
 #define DEFAULT_CONFIG_PATH "/etc/ipad/config.json"
@@ -520,21 +521,23 @@ static void observer(struct ipa_context *ctx, enum ipa_run_event ev, int rc, voi
  * Main loop
  * --------------------------------------------------------------------- */
 
-/* The interval for the wait after this cycle: -i when given, otherwise whatever the configuration file says now.
- * Read once per cycle, like the rest of the file, so an edited interval applies from the next cycle on (or at once
- * after SIGHUP). */
-static unsigned long current_interval(void)
+/* What the configuration file says for the coming cycle: the poll interval (unless -i overrides it) and the
+ * transport, which is the front end's to select because the core knows nothing about transports. Read once per
+ * cycle, like the rest of the file, so an edit applies from the next cycle on (at once after SIGHUP or when the
+ * daemon notices the file changed). */
+static unsigned long load_cycle_config(void)
 {
 	struct ipa_run_config *rcfg;
 	unsigned long interval;
 
-	if (opts.interval_override)
-		return opts.interval_override;
-
 	rcfg = ipa_config_json_load(opts.config_path);
 	if (!rcfg)
-		return status.interval; /* keep the previous one; the cycle itself reports the broken file */
-	interval = ipa_run_config_poll_seconds(rcfg);
+		return opts.interval_override ? opts.interval_override : status.interval;
+
+	/* NULL selects PC/SC, as it did before there were other transports. */
+	ipa_scard_set_transport(rcfg->transport);
+
+	interval = opts.interval_override ? opts.interval_override : ipa_run_config_poll_seconds(rcfg);
 	ipa_run_config_free(rcfg);
 	return interval;
 }
@@ -726,7 +729,7 @@ int main(int argc, char **argv)
 
 	rc = 0;
 	while (!stop_requested) {
-		status.interval = current_interval();
+		status.interval = load_cycle_config();
 
 		if (!wait_ready("poll"))
 			break;

@@ -2,8 +2,14 @@
 	"_comment": "IPAd configuration. Copy to /etc/ipad/config.json; the daemon notices changes by itself. Keys starting with _ are ignored.",
 
 	"tac": "12345678",
+
+	"_transport": "how the eUICC is reached: \"at:/dev/ttyUSB2\" for a modem (AT+CSIM), \"pcsc:0\" for a card reader. AT options: ?timeout=MS&baud=RATE&reset=none|cfun&resetwait=MS",
+	"transport": "at:/dev/ttyUSB2",
+	"_reader_num": "used only by the pcsc transport when the URI does not carry a reader number",
 	"reader_num": 0,
-	"euicc_channel": 1,
+
+	"_euicc_channel": "\"auto\" lets the eUICC pick the logical channel, which is what a modem needs; a number asks for that channel, 0 uses the basic channel",
+	"euicc_channel": "auto",
 	"_preferred_eim_id": "set to the eimId to use when the eUICC has several; absent: the first one",
 
 	"esipa_binding": "asn1",

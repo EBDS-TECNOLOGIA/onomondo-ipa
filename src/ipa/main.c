@@ -17,6 +17,9 @@
 #include <onomondo/ipa/utils.h>
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/ipad.h>
+#ifdef IPA_HAVE_TRANSPORT_URI
+#include <onomondo/ipa/scard_transport.h>
+#endif
 
 #define DEFAULT_READER_NUMBER 0
 #define DEFAULT_CHANNEL_NUMBER 1
@@ -118,7 +121,12 @@ static void print_help(void)
 	       IPA_LEN_IMEI * 2);
 	printf(" -e eimId ............ set preferred eIM (in case the eUICC has multiple)\n");
 	printf(" -r N ................ set reader number (default: %d)\n", DEFAULT_READER_NUMBER);
-	printf(" -c N ................ set logical channel number (default: %d)\n", DEFAULT_CHANNEL_NUMBER);
+	printf(" -c N|auto ........... set logical channel number, or let the eUICC pick one (default: %d)\n",
+	       DEFAULT_CHANNEL_NUMBER);
+#ifdef IPA_HAVE_TRANSPORT_URI
+	printf(" -T URI .............. how to reach the eUICC: pcsc:N or at:/dev/ttyUSBx (default: pcsc)\n");
+	printf("                       see include/onomondo/ipa/scard_transport.h for the options\n");
+#endif
 	printf(" -f PATH ............. set initial eIM configuration\n");
 	printf(" -m .................. reset eUICC memory (everything except Provisioning Profiles)\n");
 	printf(" -p .................. delete the Provisioning Profiles -- these carry the bootstrap\n");
@@ -372,7 +380,7 @@ int main(int argc, char **argv)
 
 	/* Overwrite configuration values with user defined parameters */
 	while (1) {
-		opt = getopt(argc, argv, "ht:M:e:r:c:f:mpn:C:SIEjLl:d:y:a1RiFbXxGD:AP:");
+		opt = getopt(argc, argv, "ht:M:e:r:c:T:f:mpn:C:SIEjLl:d:y:a1RiFbXxGD:AP:");
 		if (opt == -1)
 			break;
 
@@ -416,8 +424,18 @@ int main(int argc, char **argv)
 			cfg.reader_num = atoi(optarg);
 			break;
 		case 'c':
-			cfg.euicc_channel = atoi(optarg);
+			/* "auto" lets the eUICC pick the channel, which is what a modem transport needs. */
+			if (strcmp(optarg, "auto") == 0)
+				cfg.euicc_channel = IPA_EUICC_CHANNEL_AUTO;
+			else
+				cfg.euicc_channel = atoi(optarg);
 			break;
+#ifdef IPA_HAVE_TRANSPORT_URI
+		case 'T':
+			if (ipa_scard_set_transport(optarg) < 0)
+				return -EINVAL;
+			break;
+#endif
 		case 'f':
 			getopt_initial_eim_cfg_file = optarg;
 			break;
@@ -507,7 +525,13 @@ int main(int argc, char **argv)
 	printf(" nvstate path: %s\n", getopt_nvstate_path);
 	printf(" preferred_eim_id = %s\n", cfg.preferred_eim_id ? cfg.preferred_eim_id : "(first configured eIM)");
 	printf(" reader_num = %d\n", cfg.reader_num);
-	printf(" euicc_channel = %d\n", cfg.euicc_channel);
+	if (cfg.euicc_channel == IPA_EUICC_CHANNEL_AUTO)
+		printf(" euicc_channel = auto (chosen by the eUICC)\n");
+	else
+		printf(" euicc_channel = %d\n", cfg.euicc_channel);
+#ifdef IPA_HAVE_TRANSPORT_URI
+	printf(" transport = %s\n", ipa_scard_get_transport());
+#endif
 	if (cfg.eim_cabundle)
 		printf(" eim_cabundle = %s\n", cfg.eim_cabundle);
 	printf(" eim_disable_ssl = %d\n", cfg.eim_disable_ssl);

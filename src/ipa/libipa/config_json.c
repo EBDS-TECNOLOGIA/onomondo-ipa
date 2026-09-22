@@ -94,6 +94,7 @@ void ipa_run_config_free(struct ipa_run_config *rcfg)
 	IPA_FREE(rcfg->cfg.preferred_eim_id);
 	IPA_FREE((char *)rcfg->cfg.eim_cabundle);
 	IPA_FREE(rcfg->nvstate_path);
+	IPA_FREE(rcfg->transport);
 	IPA_FREE(rcfg->initial_eim_cfg_path);
 	IPA_FREE(rcfg->log.path);
 	IPA_FREE(rcfg);
@@ -117,6 +118,7 @@ static const char *const known_keys[] = {
 	"preferred_eim_id",	/* -e */
 	"reader_num",		/* -r */
 	"euicc_channel",	/* -c */
+	"transport",		/* (no flag; see onomondo/ipa/scard_transport.h) */
 	"initial_eim_cfg_path",	/* -f */
 	"euicc_memory_reset",	/* -m */
 	"nvstate_path",		/* -n */
@@ -305,6 +307,34 @@ static int get_poll_unit(json_t *obj, enum ipa_poll_interval_unit *out)
 	return 0;
 }
 
+/* The ISD-R logical channel: a number, or "auto" to let the eUICC pick one (IPA_EUICC_CHANNEL_AUTO), which is
+ * what a modem needs -- see ipa_config.euicc_channel. */
+static int get_channel(json_t *obj, uint8_t *out)
+{
+	json_t *val = json_object_get(obj, "euicc_channel");
+	json_int_t num;
+
+	if (!val)
+		return 0;
+
+	if (json_is_string(val)) {
+		if (strcmp(json_string_value(val), "auto") != 0) {
+			IPA_LOGP(SMAIN, LERROR,
+				 "config: \"euicc_channel\" must be a number from 0 to %d, or \"auto\"\n",
+				 IPA_MAX_CHANNEL_NUMBER);
+			return -EINVAL;
+		}
+		*out = IPA_EUICC_CHANNEL_AUTO;
+		return 0;
+	}
+
+	num = *out;
+	if (get_uint(obj, "", "euicc_channel", IPA_MAX_CHANNEL_NUMBER, &num) < 0)
+		return -EINVAL;
+	*out = (uint8_t)num;
+	return 0;
+}
+
 /* A log level name, as ipa_log_level_by_name() knows them. Absent leaves *out alone. */
 static int get_log_level(json_t *val, const char *path, int *out)
 {
@@ -456,6 +486,8 @@ struct ipa_run_config *ipa_config_json_parse(const char *json, size_t json_len)
 		goto err;
 	if (get_str(obj, "", "nvstate_path", &rcfg->nvstate_path) < 0)
 		goto err;
+	if (get_str(obj, "", "transport", &rcfg->transport) < 0)
+		goto err;
 	if (get_str(obj, "", "initial_eim_cfg_path", &rcfg->initial_eim_cfg_path) < 0)
 		goto err;
 	/* cfg.eim_cabundle is const char * but the storage is ours to free. */
@@ -480,10 +512,8 @@ struct ipa_run_config *ipa_config_json_parse(const char *json, size_t json_len)
 		goto err;
 	rcfg->cfg.reader_num = (unsigned int)num;
 
-	num = rcfg->cfg.euicc_channel;
-	if (get_uint(obj, "", "euicc_channel", IPA_MAX_CHANNEL_NUMBER, &num) < 0)
+	if (get_channel(obj, &rcfg->cfg.euicc_channel) < 0)
 		goto err;
-	rcfg->cfg.euicc_channel = (uint8_t)num;
 
 	num = rcfg->cfg.esipa_req_retries;
 	if (get_uint(obj, "", "esipa_req_retries", UINT_MAX, &num) < 0)

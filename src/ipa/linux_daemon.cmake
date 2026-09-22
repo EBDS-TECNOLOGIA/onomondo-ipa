@@ -23,6 +23,19 @@ if(PCSCLITE_FOUND)
   target_include_directories(scard BEFORE PRIVATE ${PCSCLITE_INCLUDE_DIRS})
 endif()
 
+# The eUICC transport is chosen at run time (onomondo/ipa/scard_transport.h): PC/SC as before, or a modem's
+# AT+CSIM. scard_dispatch.c provides the ipa_scard_* functions the core calls and forwards them; scard.c keeps
+# its own source unchanged and is compiled with its names mapped to ipa_scard_pcsc_*, so that file still merges
+# with the Android and Windows ports.
+target_sources(scard PRIVATE scard_dispatch.c scard_at.c)
+# The rename is per source file: scard_dispatch.c and scard_at.c must see the real names.
+set_source_files_properties(scard.c PROPERTIES COMPILE_DEFINITIONS
+  "ipa_scard_init=ipa_scard_pcsc_init;ipa_scard_reset=ipa_scard_pcsc_reset;ipa_scard_atr=ipa_scard_pcsc_atr;ipa_scard_transceive=ipa_scard_pcsc_transceive;ipa_scard_free=ipa_scard_pcsc_free")
+# Front ends can select a transport, and know they can; the tests check whether it was built.
+target_compile_definitions(ipa PRIVATE IPA_HAVE_TRANSPORT_URI=1)
+set(IPA_HAVE_TRANSPORT_URI ON CACHE INTERNAL "the eUICC transport dispatcher is built")
+set(IPA_PCSC_LIBRARY ${PCSC_LIBRARY} CACHE INTERNAL "PC/SC library the scard target needs")
+
 # ipad: the daemon (ipad_linux.c), for OpenWrt and other supervised Linux hosts. Same backends as the CLI.
 add_executable(ipad ipad_linux.c)
 set_property(TARGET ipad PROPERTY C_STANDARD 99)

@@ -83,7 +83,12 @@ static void log_config(const struct ipa_run_config *rcfg)
 	IPA_LOGP(SMAIN, LINFO, "preferred_eim_id = %s\n",
 		 rcfg->cfg.preferred_eim_id ? rcfg->cfg.preferred_eim_id : "(first configured eIM)");
 	IPA_LOGP(SMAIN, LINFO, "reader_num = %u\n", rcfg->cfg.reader_num);
-	IPA_LOGP(SMAIN, LINFO, "euicc_channel = %u\n", rcfg->cfg.euicc_channel);
+	if (rcfg->cfg.euicc_channel == IPA_EUICC_CHANNEL_AUTO)
+		IPA_LOGP(SMAIN, LINFO, "euicc_channel = auto (chosen by the eUICC)\n");
+	else
+		IPA_LOGP(SMAIN, LINFO, "euicc_channel = %u\n", rcfg->cfg.euicc_channel);
+	if (rcfg->transport)
+		IPA_LOGP(SMAIN, LINFO, "transport = %s\n", rcfg->transport);
 	if (rcfg->cfg.eim_cabundle)
 		IPA_LOGP(SMAIN, LINFO, "eim_cabundle = %s\n", rcfg->cfg.eim_cabundle);
 	IPA_LOGP(SMAIN, LINFO, "eim_disable_ssl = %d\n", rcfg->cfg.eim_disable_ssl);

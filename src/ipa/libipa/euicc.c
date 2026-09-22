@@ -53,6 +53,22 @@
 #define REFRESH_NAA_APP_RESET 0x05
 #define REFRESH_NAA_SESSION_RESET 0x06
 
+/* ISO/IEC 7816-4 encodes the logical channel in the CLA byte in two ways: channels 0 to 3 in the two lowest bits
+ * of the first inter-industry class, channels 4 to 19 in the four lowest bits of the further inter-industry class,
+ * which also moves the class itself (0x00 -> 0x40, 0x80 -> 0xC0). A modem usually holds channels of its own, so
+ * the eUICC hands out numbers above 3 often enough for this to matter.
+ *  \param[in] cla class byte for the basic channel (0x00 inter-industry, 0x80 proprietary).
+ *  \param[in] channel logical channel number, 0 to IPA_EUICC_CHANNEL_MAX.
+ *  \returns the class byte addressing that channel. */
+static uint8_t cla_for_channel(uint8_t cla, uint8_t channel)
+{
+	assert(channel <= IPA_EUICC_CHANNEL_MAX);
+
+	if (channel < 4)
+		return cla | channel;
+	return (uint8_t)((cla & 0x80 ? 0xC0 : 0x40) | (channel - 4));
+}
+
 #define MAX_BLOCKSIZE_TX 255
 #define MAX_BLOCKSIZE_RX 256
 
@@ -146,7 +162,6 @@ static int send_es10x_block(struct ipa_context *ctx, uint16_t *sw,
 	struct res_apdu res_apdu = { 0 };
 	struct ipa_buf *buf_req = NULL;
 	struct ipa_buf *buf_res = NULL;
-	uint8_t channel = ctx->cfg->euicc_channel;
 
 	buf_res = ipa_buf_alloc(MAX_BLOCKSIZE_TX + 2);
 	assert(buf_res);
@@ -155,7 +170,7 @@ static int send_es10x_block(struct ipa_context *ctx, uint16_t *sw,
 
 	/* fill in request APDU for STORE DATA
 	 * (see also GSMA SGP.22, section 5.7.2) */
-	req_apdu.cla = STORE_DATA_CLA | channel;
+	req_apdu.cla = cla_for_channel(STORE_DATA_CLA, ctx->euicc_channel);
 	req_apdu.ins = STORE_DATA_INS;
 	if (len_req > MAX_BLOCKSIZE_TX)
 		req_apdu.p1 = STORE_DATA_P1_MORE_BLOCKS;
@@ -204,12 +219,8 @@ static int recv_es10x_block(struct ipa_context *ctx, uint16_t *sw,
 	struct res_apdu res_apdu = { 0 };
 	struct ipa_buf *buf_req = NULL;
 	struct ipa_buf *buf_res = NULL;
-	uint8_t channel = ctx->cfg->euicc_channel;
 	struct ipa_buf *es10x_res_ptr = *es10x_res;
 	size_t realloc_size;
-
-	/* We only support channel 0-3 */
-	assert(channel <= 3);
 
 	buf_res = ipa_buf_alloc(MAX_BLOCKSIZE_RX + 2);
 	assert(buf_res);
@@ -226,7 +237,7 @@ static int recv_es10x_block(struct ipa_context *ctx, uint16_t *sw,
 
 	/* fill in request APDU for GET RESPONSE
 	 * (see also ISO/IEC 7816-4, 7.6.1) */
-	req_apdu.cla = GET_RESPONSE_CLA | channel;
+	req_apdu.cla = cla_for_channel(GET_RESPONSE_CLA, ctx->euicc_channel);
 	req_apdu.ins = GET_RESPONSE_INS;
 	req_apdu.p1 = 0x00;
 	req_apdu.p2 = 0x00;
@@ -776,7 +787,7 @@ static void get_isdr_fci(struct ipa_context *ctx, uint8_t fci_len)
 	buf_res = ipa_buf_alloc(MAX_BLOCKSIZE_RX + 2);
 	assert(buf_res);
 
-	req_apdu.cla = GET_RESPONSE_CLA | ctx->cfg->euicc_channel;
+	req_apdu.cla = cla_for_channel(GET_RESPONSE_CLA, ctx->euicc_channel);
 	req_apdu.ins = GET_RESPONSE_INS;
 	req_apdu.le = fci_len ? fci_len : 256;
 	buf_req = format_req_apdu(&req_apdu);
@@ -787,7 +798,10 @@ static void get_isdr_fci(struct ipa_context *ctx, uint8_t fci_len)
 		goto exit;
 	}
 	if (parse_res_apdu(&res_apdu, buf_res) < 0 || (res_apdu.sw & 0xFF00) != 0x9000) {
-		IPA_LOGP(SEUICC, LERROR, "unable to read the ISD-R FCI, sw=%04x\n", res_apdu.sw);
+		/* Best effort, like the rest of this function: one eUICC answers 6E00 to this GET RESPONSE and still
+		 * serves every ES10x command afterwards. */
+		IPA_LOGP(SEUICC, LINFO, "unable to read the ISD-R FCI, sw=%04x -- carrying on without it\n",
+			 res_apdu.sw);
 		goto exit;
 	}
 
@@ -861,16 +875,12 @@ static int select_isd_r(struct ipa_context *ctx)
 	struct res_apdu res_apdu = { 0 };
 	struct ipa_buf *buf_req = NULL;
 	struct ipa_buf *buf_res = NULL;
-	uint8_t channel = ctx->cfg->euicc_channel;
-
-	/* We only support channel 0-3 */
-	assert(channel <= 3);
 
 	buf_res = ipa_buf_alloc(MAX_BLOCKSIZE_RX + 2);
 	assert(buf_res);
 
 	/* SELECT ADF.ISD-R */
-	req_apdu.cla = SELECT_CLA | channel;
+	req_apdu.cla = cla_for_channel(SELECT_CLA, ctx->euicc_channel);
 	req_apdu.ins = SELECT_INS;
 	req_apdu.p1 = 0x04;
 	req_apdu.p2 = 0x04;
@@ -912,6 +922,15 @@ exit:
 
 }
 
+/*! Open or close the ES10x logical channel, see ipa_config.euicc_channel.
+ *
+ *  Opening with IPA_EUICC_CHANNEL_AUTO asks the eUICC for a free channel (P2 = 0, ISO/IEC 7816-4 and ETSI TS 102
+ *  221 section 11.1.17), and the number it returns is kept in ctx->euicc_channel; that is what a modem needs,
+ *  since it holds channels of its own and a fixed number may already be taken. Asking for a specific channel
+ *  stays possible and behaves as before.
+ *  \param[inout] ctx pointer to ipa_context.
+ *  \param[in] close true closes the channel in use, false opens one.
+ *  \returns 0 on success, negative on error. */
 static int manage_channel(struct ipa_context *ctx, bool close)
 {
 	int rc;
@@ -919,12 +938,17 @@ static int manage_channel(struct ipa_context *ctx, bool close)
 	struct res_apdu res_apdu = { 0 };
 	struct ipa_buf *buf_req = NULL;
 	struct ipa_buf *buf_res = NULL;
-	uint8_t channel = ctx->cfg->euicc_channel;
+	bool ask_euicc = !close && ctx->cfg->euicc_channel == IPA_EUICC_CHANNEL_AUTO;
+	uint8_t channel = close ? ctx->euicc_channel : ctx->cfg->euicc_channel;
 
-	/* We only support channel 0-3 */
-	assert(channel <= 3);
+	if (!ask_euicc && channel > IPA_EUICC_CHANNEL_MAX) {
+		IPA_LOGP(SEUICC, LERROR, "logical channel %u is out of range (0 to %u)\n", channel,
+			 IPA_EUICC_CHANNEL_MAX);
+		return -EINVAL;
+	}
 
-	if (channel == 0) {
+	if (!ask_euicc && channel == 0) {
+		ctx->euicc_channel = 0;
 		IPA_LOGP(SEUICC, LINFO, "using basic logical channel %u, no need to %s a channel\n", channel,
 			 close ? "close" : "open");
 		return 0;
@@ -940,15 +964,17 @@ static int manage_channel(struct ipa_context *ctx, bool close)
 		req_apdu.p1 = 0x80;
 	else
 		req_apdu.p1 = 0x00;
-	req_apdu.p2 = channel;
+	/* P2 = 0 on an open asks the eUICC to pick the channel and return its number; otherwise it names the
+	 * channel, and the response carries no data. */
+	req_apdu.p2 = ask_euicc ? 0x00 : channel;
 	req_apdu.lc = 0;
-	req_apdu.le = 0;
+	req_apdu.le = ask_euicc ? 1 : 0;
 	buf_req = format_req_apdu(&req_apdu);
 
 	rc = ipa_scard_transceive(ctx->scard_ctx, buf_res, buf_req);
 	if (rc < 0) {
-		IPA_LOGP(SEUICC, LERROR, "unable %s logical channel %u due to communication error with eUICC\n",
-			 close ? "close" : "open", channel);
+		IPA_LOGP(SEUICC, LERROR, "unable to %s a logical channel due to communication error with eUICC\n",
+			 close ? "close" : "open");
 		ctx->check_scard = true;
 		rc = -EIO;
 		goto exit;
@@ -956,8 +982,8 @@ static int manage_channel(struct ipa_context *ctx, bool close)
 
 	rc = parse_res_apdu(&res_apdu, buf_res);
 	if (rc < 0) {
-		IPA_LOGP(SEUICC, LERROR, "invalid response from eUICC, cannot %s logical channel %u\n",
-			 close ? "close" : "open", channel);
+		IPA_LOGP(SEUICC, LERROR, "invalid response from eUICC, cannot %s a logical channel\n",
+			 close ? "close" : "open");
 		rc = -EINVAL;
 		goto exit;
 	}
@@ -969,7 +995,27 @@ static int manage_channel(struct ipa_context *ctx, bool close)
 		goto exit;
 	}
 
-	IPA_LOGP(SEUICC, LINFO, "logical channel %u %s\n", channel, close ? "closed" : "opened");
+	if (ask_euicc) {
+		if (res_apdu.le != 1) {
+			IPA_LOGP(SEUICC, LERROR,
+				 "the eUICC opened a logical channel but did not say which (%u bytes of data)\n",
+				 res_apdu.le);
+			rc = -EINVAL;
+			goto exit;
+		}
+		channel = res_apdu.data[0];
+		if (channel == 0 || channel > IPA_EUICC_CHANNEL_MAX) {
+			IPA_LOGP(SEUICC, LERROR, "the eUICC opened logical channel %u, which cannot be addressed\n",
+				 channel);
+			rc = -EINVAL;
+			goto exit;
+		}
+	}
+	if (!close)
+		ctx->euicc_channel = channel;
+
+	IPA_LOGP(SEUICC, LINFO, "logical channel %u %s%s\n", channel, close ? "closed" : "opened",
+		 ask_euicc ? " (chosen by the eUICC)" : "");
 exit:
 	IPA_FREE(buf_req);
 	IPA_FREE(buf_res);

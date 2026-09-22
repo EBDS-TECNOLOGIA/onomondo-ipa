@@ -18,6 +18,12 @@
  *  3GPP release 15). */
 #define IPA_LEN_VERSION 3
 #define IPA_LEN_ALLOWED_CA 20
+
+/*! ipa_config.euicc_channel: ask the eUICC for a free logical channel instead of naming one. */
+#define IPA_EUICC_CHANNEL_AUTO 0xff
+
+/*! Highest logical channel number ISO/IEC 7816-4 can address in the CLA byte. */
+#define IPA_EUICC_CHANNEL_MAX 19
 #define IPE_LEN_EIM_ID 256
 
 struct ipa_context;
@@ -180,7 +186,9 @@ struct ipa_config {
 	/*! ID number of the cardreader that interfaces the eUICC */
 	unsigned int reader_num;
 
-	/*! Number of the logical channel that is used to communicate with the ISD-R */
+	/*! Number of the logical channel that is used to communicate with the ISD-R. 0 uses the basic channel and
+	 *  opens none; IPA_EUICC_CHANNEL_AUTO lets the card pick one, which is what a modem needs -- a modem keeps
+	 *  channels of its own open (often 1 to 3) and a fixed number may collide with them. */
 	uint8_t euicc_channel;
 
 	/*! Enable IoT eUICC emulation.

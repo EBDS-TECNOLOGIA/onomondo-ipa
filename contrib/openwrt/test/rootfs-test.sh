@@ -186,6 +186,24 @@ check "syslog priorities" 'logread -e "ipad\[" | grep -q "daemon.err ipad\[.*MAI
 check "write-on-change" 'logread -e "ipad\[" | grep -q "nvstate unchanged, not rewriting"'
 check "ubus log" '[ "$(ubus call ipad log "{\"lines\":2}" | jsonfilter -e "@.lines[*]" | wc -l)" = 2 ]'
 
+# The transport comes from the configuration and is applied by the front end.
+sleep 1
+write_config <<'JSON'
+{
+	"reader_num": 98,
+	"poll_interval": 1800,
+	"nvstate_path": "nvstate.bin",
+	"transport": "at:/dev/null?timeout=300",
+	"euicc_channel": "auto",
+	"log": { "level": "debug" },
+	"platform": { "require_wan": false, "require_ntp": true, "wan_settle": 2,
+		      "restart_on_profile_change": [ "wan_modem" ] }
+}
+JSON
+check "transport from the configuration" 'waitfor "logread -e \"ipad\[\" | grep -q \"transport = at:/dev/null\"" 20'
+check "AT transport tried and refused" 'logread -e "ipad\[" | grep -q "does not accept AT+CSIM"'
+check "auto channel accepted" 'logread -e "ipad\[" | grep -q "euicc_channel = auto"'
+
 ubus listen ipad > /tmp/listen.log 2>&1 &
 listener=$!
 sleep 1

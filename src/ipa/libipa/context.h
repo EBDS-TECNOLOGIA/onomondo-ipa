@@ -162,6 +162,10 @@ struct ipa_context {
 	 *  makes the eUICC leave IPAe deactivated, so the mode only settles once that has been sent. */
 	enum ipa_mode ipa_mode;
 
+	/*! Logical channel the ES10x link actually uses: what ipa_config.euicc_channel asked for, or the channel the
+	 *  eUICC picked when it asked for IPA_EUICC_CHANNEL_AUTO. Valid once ipa_euicc_init_es10x() has run. */
+	uint8_t euicc_channel;
+
 	/*! ISDRProprietaryApplicationTemplateIoT from the ISD-R SELECT FCI (SGP.32, section 3.8.4).
 	 *  valid stays false when the eUICC did not return the template -- an SGP.22 card, or one that
 	 *  answered the SELECT without an FCI. ipae_supported is a static property of the eUICC and does

@@ -95,6 +95,11 @@ struct ipa_run_config {
 	/*! Path of the non-volatile state file (JSON: nvstate_path). */
 	char *nvstate_path;
 
+	/*! How the eUICC is reached (JSON: transport), e.g. "pcsc:0" or "at:/dev/ttyUSB2"; NULL for the PC/SC
+	 *  default with cfg.reader_num. The front end passes it to ipa_scard_set_transport(), see
+	 *  onomondo/ipa/scard_transport.h -- the core itself knows nothing about transports. */
+	char *transport;
+
 	/*! Optional path of an initial eIM configuration in BER
 	 *  (JSON: initial_eim_cfg_path).  NULL when not configured. */
 	char *initial_eim_cfg_path;

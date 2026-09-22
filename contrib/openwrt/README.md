@@ -6,8 +6,8 @@ configured by a JSON file that another program maintains.
 
 Background and design: [`OPENWRT_PORT_ANALYSIS.md`](../../OPENWRT_PORT_ANALYSIS.md), sections 7 and 7.6.
 
-**State:** the only eUICC transport so far is PC/SC, i.e. a USB smart-card reader on the router. The modem
-transports (AT, QMI, MBIM) are the next phase.
+**State:** the eUICC is reached either through a modem's `AT+CSIM` or through a PC/SC reader, see *Reaching the
+eUICC* below. QMI and MBIM transports are not implemented.
 
 ## Building
 
@@ -58,6 +58,8 @@ Additions to the format of the Android port:
 |---|---|
 | `log.level` | `error`, `info` or `debug` for every subsystem; without it the service logs at `info` |
 | `log.subsys_levels` | per subsystem, e.g. `{"ES10x": "debug"}`; subsystems: MAIN, HTTP, SCARD, IPA, ES10x, ES10b, eUICC, ESIPA |
+| `transport` | how the eUICC is reached (see below); absent means PC/SC with `reader_num` |
+| `euicc_channel` | `"auto"` (the eUICC picks the logical channel, needed with a modem), a number, or 0 for the basic channel |
 | `platform` | settings of the OpenWrt scripts below; the IPAd itself only checks that it is an object |
 
 `platform` keys (all optional):
@@ -75,6 +77,49 @@ The initial eIM configuration of an unprovisioned eUICC is loaded with the CLI w
 ```
 /etc/init.d/ipad stop
 ipa -r 0 -n /etc/ipad/nvstate.bin -f /path/to/AddInitialEimRequest.ber
+/etc/init.d/ipad start
+```
+
+## Reaching the eUICC
+
+`transport` in the configuration selects it:
+
+| URI | Meaning |
+|---|---|
+| `at:/dev/ttyUSB2` | APDUs through the modem's `AT+CSIM` (3GPP TS 27.007 §8.17) |
+| `pcsc:0` | PC/SC reader 0, for a USB card reader |
+
+Options are appended to the AT URI as `?name=value&name=value`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `timeout` | 5000 | milliseconds to wait for the answer to one AT command |
+| `baud` | unchanged | line speed; USB ports ignore it |
+| `reset` | `none` | how to reset the card, which an eUICC asks for after a profile change: `none` leaves it to the platform, `cfun` sends `AT+CFUN=0` then `AT+CFUN=1` (this also drops the radio) |
+| `resetwait` | 20000 | milliseconds to wait for the card after a reset |
+| `quirks=echo` | off | leave the modem's command echo on instead of sending `ATE0` |
+
+Set `"euicc_channel": "auto"` with a modem: it keeps logical channels of its own, so the eUICC has to pick a
+free one. Channels 4 to 19 are addressed correctly.
+
+**ModemManager, or anything else using the port.** The IPAd locks its AT port with `flock(2)`, which keeps two
+IPAd instances apart but says nothing to ModemManager, which takes no lock. Either give the IPAd a port
+ModemManager does not use — `mmcli -m any` lists the ones it does — or stop it while testing:
+
+```
+/etc/init.d/modemmanager stop
+```
+
+Two modems seen so far: a **Quectel EC200A** reads the EID of two different eUICCs over `AT+CSIM`, while a
+**Fibocom NL668** refuses to select the ISD-R (`6999`, and `AccessDenied` over QMI), so the eUICC cannot be
+reached through it at all. The IPAd does not use `AT+CCHO`/`AT+CGLA`: the core opens the channel and chains
+`GET RESPONSE` itself, exactly as it does over PC/SC.
+
+The CLI takes the same URI with `-T`, which is how the initial eIM configuration is loaded through a modem:
+
+```
+/etc/init.d/ipad stop
+ipa -T at:/dev/ttyUSB2 -c auto -n /etc/ipad/nvstate.bin -f /path/to/AddInitialEimRequest.ber
 /etc/init.d/ipad start
 ```
 

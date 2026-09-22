@@ -1,8 +1,9 @@
 # onomondo-ipa on OpenWrt — Port Analysis
 
-*Tree: `~/openwrt-port/ipa`, branch `ports/openwrt`. 2026-09-17. Updated the
-same day: Android daemon pieces ported forward (§1.1); daemon, OpenWrt packaging,
-ubus and LuCI implemented (§1.2).*
+*Tree: `~/openwrt-port/ipa`, branch `ports/openwrt`. 2026-09-17, updated
+2026-09-21. Android daemon pieces ported forward (§1.1); daemon, OpenWrt
+packaging and ubus implemented, LuCI dropped (§1.2); the mbedTLS backend and the
+AT+CSIM modem transport implemented (§1.2, §9.4).*
 
 ## 0. Summary
 
@@ -100,14 +101,18 @@ New files carry the EBDS copyright line.
 | Context info | `ipa_get_ctx_info()` in `ipad.h` | EID, eIM id/FQDN, IPA mode, for the status file |
 | Power-safe nvstate | `fileio.c`, `run.c`, `ipad.c` | Temporary file + `fsync` + `rename`; skipped when unchanged. **Core fix:** `nvstate_serialize()` wrote heap pointer values into the image, so identical states never produced identical files; those slots are now written as zero (the deserializer never used them) |
 | OpenWrt feed | `contrib/openwrt/ipad/`, `contrib/openwrt/luci-app-ipad/`, `contrib/openwrt/README.md` | Package Makefiles, procd init, UCI defaults, readiness/event scripts, NTP hotplug, sysupgrade keep list, rpcd plugin, LuCI status/settings/log pages with ACL |
-| Tests | `tests/daemon_support/` (ctest), `contrib/openwrt/test/rootfs-test.sh` | ctest: syslog sink, atomic/write-on-change save, daemon signals/status/hooks. Rootfs test: 39 checks against the real OpenWrt 25.12.5 userland (procd, ubus, rpcd, logd, uhttpd) in an unprivileged namespace |
+| eUICC transport | `onomondo/ipa/scard_transport.h`, `src/ipa/scard_dispatch.c`, `src/ipa/scard_at.c` | `transport` in the configuration (`-T` for the CLI) picks PC/SC or a modem's AT+CSIM at run time. `scard.c` is untouched: the build maps its names to `ipa_scard_pcsc_*` |
+| Channels | `libipa/euicc.c`, `ipa_config.euicc_channel` | `"auto"` (IPA_EUICC_CHANNEL_AUTO) lets the eUICC pick the logical channel, which a modem needs; channels 4 to 19 are encoded correctly in the CLA byte |
+| TLS | `src/ipa/http_tls.h`, `http_tls_openssl.c`, `http_tls_mbedtls.c` | `-DIPA_HTTP_TLS=openssl|mbedtls`; the OpenWrt package follows libcurl's setting (§9.4) |
+| Tests | `tests/daemon_support/`, `tests/http_tls/`, `tests/scard_at/` (ctest), `contrib/openwrt/test/rootfs-test.sh` | ctest: syslog sink, atomic/write-on-change save, daemon signals/status/hooks. Rootfs test: 39 checks against the real OpenWrt 25.12.5 userland (procd, ubus, rpcd, logd, uhttpd) in an unprivileged namespace |
 
-Verification: 28/28 ctest in the default, `-DESIPA_BINDING_JSON=OFF` and
-`-DESIPA_BINDING_ASN1=OFF` builds, and 29/29 with `-DIOT_EUICC_EMULATION=ON`,
-all with ASan and zero warnings. The rootfs test passes 39/39. **Not verified:**
-a cross build with the OpenWrt SDK (its host prerequisites need `apt`, §10),
-the LuCI pages in a browser (syntax-checked only), and anything involving a
-real eUICC or modem.
+Verification (2026-09-21): 31/31 ctest in the default, `-DESIPA_BINDING_JSON=OFF`
+and `-DESIPA_BINDING_ASN1=OFF` builds, 32/32 with `-DIOT_EUICC_EMULATION=ON`, all
+with ASan and zero warnings; the rootfs test passes 47/47. The TLS cases also ran
+against Mbed TLS 3.6.7 with curl 8.19 built from source. **Not verified:** a cross
+build with the OpenWrt SDK (its host prerequisites need `apt`, §10), and the
+transport against a real modem — the AT test drives a fake modem on a pseudo
+terminal, replaying a recorded Quectel EC200A session.
 
 Findings during the work:
 
@@ -628,16 +633,26 @@ again (§7.2 and §7.6 describe the earlier plan).
 | B. Replace the device's libcurl with an OpenSSL build | Low code, high operational cost | `libopenssl3` is already there, but the replaced `libcurl4` differs from the official package: `apk upgrade` or a sysupgrade brings the mbedTLS one back |
 | C. Link a private static libcurl (OpenSSL) into `ipad` | Low code | Duplicates curl in the image and needs its own security updates |
 
-**Modem probe so far:** `AT+CSIM` works; `AT+CCHO` and `AT+CGLA` answer `ERROR`; SELECT of the ISD-R on the
-channel opened with MANAGE CHANNEL answered `6999` (Java Card "applet selection failed"), still being
-investigated. Consequences:
+**Modem findings (2026-09-21).** Two modules were tried with the same probe:
 
-* **AT+CSIM alone is enough.** The core already opens the logical channel itself
-  (MANAGE CHANNEL), selects the ISD-R, and chains GET RESPONSE, exactly as over
-  PC/SC, so a CSIM transport is a thin wrapper and needs none of the "modem owns
-  the channel" changes of §3.2 items 1 and 5. What remains to be probed is
-  whether the modem passes MANAGE CHANNEL and SELECT through CSIM, whether it
-  returns `61xx` itself, and its command-line length limit.
+| Modem | Result |
+|---|---|
+| **Fibocom NL668-EAU** (fw 19305.1000.00.02.73.04) | `AT+CSIM` works, `AT+CCHO`/`AT+CGLA` answer `ERROR`, and SELECT of the ISD-R answers `6999` on every channel, with or without a TERMINAL CAPABILITY first. QMI refuses `--uim-open-logical-channel` with `AccessDenied` and does not implement slot status. **The eUICC cannot be reached through this module.** Its AT manual documents no eSIM or terminal-capability command, and libqmi has no terminal-capability message |
+| **Quectel EC200A** (EC200AAUHAR01A11M16) | **Works.** With TERMINAL CAPABILITY first, a card-assigned channel, SELECT of the ISD-R and GET RESPONSE, `AT+CSIM` read the EID of two different eUICCs (Thales `8903302393…`, Linksfield `8904404593…`). The Thales ISD-R FCI reports `ipaeSupported` and `enabledProfile`, and a 255-byte maximum command data field. Not a Qualcomm module: **no QMI** (ECM/RNDIS/PPP), so the WAN side is `ncm`/`ecm` or ModemManager |
+
+So the card was never the problem; the NL668 firmware is. One quirk to carry: on the Linksfield card the GET
+RESPONSE that fetches the ISD-R FCI answered `6E00` while every ES10x command worked, so that read is treated
+as best-effort.
+
+Consequences:
+
+* **AT+CSIM alone is enough, and it is what was implemented** (§1.2). The core
+  already opens the logical channel itself (MANAGE CHANNEL), selects the ISD-R
+  and chains GET RESPONSE, exactly as over PC/SC, so the transport is a thin
+  wrapper and needs none of the "modem owns the channel" changes of §3.2 items
+  1 and 5. What it did need: the channel number chosen by the card, and the CLA
+  encoding for channels above 3, since a modem keeps channels of its own (the
+  EC200A handed out 1, 2 and 3 in different runs).
 * **QMI through `qmi-proxy`** avoids sharing an AT port with ModemManager and
   is the better fit for this router. `qmicli` 1.36 (`apk add qmi-utils`) has
   `--uim-open-logical-channel` / `--uim-send-apdu`, so it can be probed without
