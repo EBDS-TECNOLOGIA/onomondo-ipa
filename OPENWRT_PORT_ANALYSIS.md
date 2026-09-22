@@ -1,9 +1,19 @@
 # onomondo-ipa on OpenWrt — Port Analysis
 
-*Tree: `~/openwrt-port/ipa`, branch `ports/openwrt`. 2026-09-17, updated
-2026-09-21. Android daemon pieces ported forward (§1.1); daemon, OpenWrt
-packaging and ubus implemented, LuCI dropped (§1.2); the mbedTLS backend and the
-AT+CSIM modem transport implemented (§1.2, §9.4).*
+*Tree: `~/openwrt-port/ipa`, branch `ports/openwrt`. Written 2026-09-17, last
+updated 2026-09-22.*
+
+## Status (2026-09-22)
+
+This started as an analysis before any code was written, and the sections below still read as such where
+nothing has changed. What has happened since:
+
+| | |
+|---|---|
+| **Hardware settled** | Router: Huasifei WH3000 Pro eMMC, upstream OpenWrt 25.12.5 (§9.4). Modem: the **Quectel EC200A works** — `AT+CSIM` read the EID of two eUICCs; the **Fibocom NL668 cannot reach the ISD-R at all** and is out (§9.4) |
+| **Implemented** | Daemon, OpenWrt package, rpcd/ubus (§1.2); Mbed TLS support in the HTTP client, so the stock libcurl works (§5); the **AT+CSIM transport** with a card-assigned logical channel (§1.2, §3) |
+| **Dropped** | LuCI and UCI: the IPAd reads one JSON file maintained by an external tool (§9.4) |
+| **Still open** | The transport against the real modem on the router; a cross build with the OpenWrt SDK (§10); an end-to-end poll against the eIM (§12, phases 2 and 4) |
 
 ## 0. Summary
 
@@ -17,9 +27,10 @@ dominate:
    answers STK proactive commands and resets the card itself. Modems expose
    APDU access in four different ways (AT+CSIM, AT+CCHO/CGLA, QMI UIM, MBIM
    UICC low-level access), and in each one the modem already does some of that
-   work. The transport layer has to become a **pluggable backend with declared
-   capabilities**, and `euicc.c` has to consult those capabilities. This is the
-   largest source change and the largest hardware unknown.
+   work. The transport layer therefore became a **pluggable backend** chosen at
+   run time, and `euicc.c` learned to take the logical channel from the card.
+   *Done for AT+CSIM (§1.2); whether a given modem allows it at all turned out
+   to be the real hardware question (§9.4).*
 2. **The IPA uses the WAN link that it manages.** Enabling a profile
    re-attaches the modem, can change the APN and drops the HTTPS session. A
    router has a connection manager (netifd with a `qmi`/`mbim`/`ncm`/`3g`
@@ -31,21 +42,22 @@ dominate:
    prints to stderr and asks for consent on stdin. The router needs a procd
    daemon with UCI configuration, logging to syslog and/or rotating files, a
    power-safe nvstate, and control via signals/ubus. The web UI (LuCI)
-   integration comes on top of that. The groundwork (JSON config,
-   `ipa_run()` loop, log sinks) has been ported forward from `ports/android`
-   (§1.1).
+   integration comes on top of that. *Done (§1.2), except that the
+   configuration is a JSON file rather than UCI and there is no LuCI app; the
+   groundwork came from `ports/android` (§1.1).*
 
 Secondary items: OpenWrt's libcurl uses **mbedTLS** by default, while `http.c`
-needs OpenSSL. Cross-building needs a **host asn1c**. The CMake files leak
-host paths (`/usr/include/PCSC`). **musl**, big-endian MIPS and flash wear
-need care.
+needed OpenSSL — *solved, the HTTP client now supports both (§5)*. The CMake
+files leaked host paths (`/usr/include/PCSC`) — *solved*. Cross-building still
+needs a **host asn1c**, and **musl**, big-endian MIPS and flash wear still need
+care.
 
 To keep it generic, the port is organised in layers that an integrator adapts
-**by data, not by code**: transport backend (C, a handful) → modem profile
-(data file with AT quirks) → board defaults (UCI) → connection-manager adapter
-and hook scripts (shell).
+**by data, not by code**: transport backend (C, a handful) → transport URI and
+settings in the JSON configuration → connection-manager adapter and hook
+scripts (shell).
 
-## 1. Starting point
+## 1. Starting point (the tree as found on 2026-09-17)
 
 | Item | State |
 |---|---|
@@ -192,11 +204,13 @@ Assumptions for the device class, to be confirmed per device (§9):
 | **MBIM MS UICC Low Level Access** | Microsoft MBIM extension | Open/close channel, APDU, **terminal capability**, **reset**, ATR | MBIM-mode modules (common for 5G M.2) | `mbimcli` 1.28 already exposes all of them, a strong sign that libmbim has it. Shares the node through `mbim-proxy`. |
 | **PC/SC** (existing) | — | — | USB reader on the router (`pcsc-lite` + `ccid` are packaged) | Development and CI only; lets the daemon be validated on OpenWrt before the modem backend exists. |
 
-Recommendation: implement **AT (both CSIM and CCHO/CGLA flavours) first**, since
-that is what was asked and works on almost every module. Design the backend
-interface so that **QMI and MBIM** fit behind it later. On a
-Qualcomm/MBIM module that netifd drives via `qmi`/`mbim`, those backends avoid
-fighting over a tty and are more robust than AT.
+**What was implemented (§1.2):** the **AT+CSIM** flavour only, behind a backend
+interface that QMI and MBIM can join later. The two modems tested settled it:
+the Quectel EC200A has no QMI at all and answers `ERROR` to AT+CCHO/CGLA, while
+the Fibocom NL668 refuses ISD-R access on every path it offers (§9.4). Where a
+module does offer QMI or MBIM and netifd drives it that way, those backends
+would still be worth having: they avoid sharing a tty with the connection
+manager.
 
 ### 3.2 Where the modem breaks the core's assumptions
 
@@ -314,18 +328,19 @@ Each item points at the code that assumes otherwise.
   wolfSSL and mbedTLS, but the callback receives an `SSL_CTX*` for the first
   two and an `mbedtls_ssl_config*` for mbedTLS, and `http.c` is written
   against OpenSSL.
-* Options:
-  * **A — build curl with OpenSSL** (`CONFIG_LIBCURL_OPENSSL=y`, depends on
-    `libopenssl3`). No code change, but it costs flash: libopenssl is on the
-    order of 1.5–2 MB against a few hundred kB for mbedTLS. It also forces a
-    custom curl build unless the firmware already ships OpenSSL.
-    **Recommended for phase 1.**
-  * **B — mbedTLS variant of the trust-anchor code** in `http.c`
-    (`#ifdef`, same public header). This matches stock OpenWrt images and
-    small-flash devices. **Recommended as a later phase** once the target's
-    flash budget is known.
-  * wolfSSL can use most of the OpenSSL code through its compat layer, but
-    that is not worth it unless a firmware already ships it.
+* **Resolved: the trust-anchor code was made TLS-library independent** rather
+  than rebuilding libcurl. `http.c` holds only the curl logic; the anchors live
+  behind `src/ipa/http_tls.h`, implemented by `http_tls_openssl.c` (the previous
+  code, moved) and `http_tls_mbedtls.c`. `-DIPA_HTTP_TLS=openssl|mbedtls`
+  chooses one, and the OpenWrt package follows libcurl's own setting, so a stock
+  image works untouched. Rebuilding libcurl with OpenSSL remains possible, and
+  would have cost 1.5–2 MB of flash and a package that differs from the
+  official one. wolfSSL could use the OpenSSL code through its compatibility
+  layer, but nothing needs that today.
+* Differences to keep in mind with Mbed TLS: a `trustedCertificateTls` becomes
+  the only trust anchor (OpenSSL keeps the system CAs alongside it), and the
+  trust anchors are installed only while verification is on. See §9.4 for the
+  test results across both libraries.
 * The system trust store (`ca-bundle`/`ca-certificates` packages) is used for
   eIMs with public certificates. `eim_cabundle` points elsewhere for private
   PKI.
@@ -607,7 +622,9 @@ CAPABILITY did not take effect. That was the failure seen on Android. If
 `MANAGE CHANNEL` (`0070000001`) to evaluate the CSIM-only path. Record all
 results. They become the first modem profile.
 
-### 9.4 First target: Huasifei WH3000 Pro eMMC (answers received 2026-09-17)
+### 9.4 First target: Huasifei WH3000 Pro eMMC, and the two modems tried
+
+*Router answers received 2026-09-17; modem results 2026-09-21.*
 
 | Fact | Consequence |
 |---|---|
@@ -754,38 +771,45 @@ pdflatex, wkhtmltopdf.
 
 | Phase | Content | Exit criterion |
 |---|---|---|
-| 0. Identify | Router + modem + eUICC facts (§9), probe (§9.3) | Filled checklists; go/no-go on TERMINAL CAPABILITY |
-| 1. Build | SDK, feed Makefile, host asn1c or pre-generated codec, PC/SC optional, OpenSSL curl; run existing CLI with PC/SC reader on the router (or in QEMU) | `ipa -h` and unit tests pass for the target arch (qemu-user) |
-| 2. AT transport | Backend + capability flags + `euicc.c` changes, developed on this box with a USB modem | GetEID / EUICCInfo1/2 through the modem on the desk, then on the router |
+| 0. Identify | Router + modem + eUICC facts (§9), probe (§9.3). **Done** (§9.4): the EC200A reads the EID of two eUICCs, the NL668 cannot | Filled checklists; go/no-go on TERMINAL CAPABILITY |
+| 1. Build | SDK, feed Makefile, host asn1c or pre-generated codec, PC/SC optional, TLS library to match libcurl; run the CLI on the router (or in QEMU). **Open:** needs the SDK host prerequisites installed (§10) | `ipa -h` and unit tests pass for the target arch (qemu-user) |
+| 2. AT transport | Backend, `euicc.c` channel handling, transport URI in the configuration. **Done** against a fake modem replaying the EC200A session (§1.2); **open** on the real module | GetEID through the modem on the router |
 | 3. Daemon | procd service, UCI, syslog sink (file sink already ported), atomic nvstate, preconditions, signals, status file. **Done** except on-device checks (§1.2) | Survives reboot, power cut and WAN loss; logs visible in `logread` |
 | 4. End-to-end | Real eIM poll; profile download/enable with WAN re-attach; rollback path; RPLMN; fallback policy | Profile switch completes and the result reaches the eIM over the new profile |
 | 5. Generalise | Modem profiles as data, hook scripts, CM adapters (netifd/ModemManager), QMI and/or MBIM backend | A second modem works with only a profile file |
 | 6. UI | rpcd exec plugin (`ipad.status/poll/reload/log`), `luci-app-ipad` (status, config, log view); **Done** and tested in an OpenWrt rootfs; LuCI pages still to be checked in a browser | Configurable and observable from LuCI and via `ubus call ipad status` |
 | 6b. (later, if needed) | Native ubus object with synchronous policy commands | — |
-| 7. Size | mbedTLS variant of `http.c` if flash requires it | Package fits the product's flash budget |
+| 7. Size | Mbed TLS support in the HTTP client. **Done** (§5), and it is what the stock image needs rather than a size measure | Package fits the product's flash budget |
 
 ## 13. Risks and open questions
 
-1. **Modem refuses TERMINAL CAPABILITY or raw CSIM.** Then the eUICC may stay
-   in "no IPA" or IPAe mode and refuse ES10. Mitigation: QMI/MBIM path,
-   vendor command, or a module choice. Test in phase 0.
-2. **Modem-internal eSIM/LPA** competing for the ISD-R.
+1. **A modem that refuses ISD-R access.** *This happened:* the Fibocom NL668
+   answers `6999` to the SELECT and `AccessDenied` over QMI, whatever the
+   TERMINAL CAPABILITY, and has no setting for it. The remedy was the module
+   itself — the Quectel EC200A works (§9.4). Check this first on any new
+   hardware; §9.3 has the probe.
+2. **Modem-internal eSIM/LPA** competing for the ISD-R. Not seen on the EC200A.
 3. **Reset only via `CFUN`**, which makes each profile change a full WAN
-   outage. That is acceptable, but timeouts must allow for it.
+   outage. The transport therefore reports "no reset method" by default and
+   leaves it to the platform; `?reset=cfun` turns the built-in one on.
 4. **Vendor firmware** with an old SDK, unavailable GPL tarball or locked
-   package installation.
-5. **Flash budget** for OpenSSL on small devices (§5).
+   package installation. Not an issue here: the router runs upstream OpenWrt.
+5. **The AT port is shared with ModemManager**, which takes no lock. Give the
+   IPAd a port ModemManager does not use, or stop it (§9.4, feed README).
 6. **JSON binding** has not been interop-tested against a real eIM
    (`GETTING_STARTED.md`).
 7. **Consumer-eUICC emulation** cannot sign eUICC Package Results (README), so
    it is lab-only.
-8. **Open for you to decide:**
-   * Which copyright sponsor goes on new OpenWrt-port files? *(To be
-     confirmed; no new OpenWrt-specific file has been created yet.)*
-   * *Decided:* the Android daemon pieces were ported forward here (§1.1);
-     consolidation across ports comes later.
-   * *Decided:* ubus and LuCI are wanted in the first delivery. §7.6
-     recommends the rpcd-plugin form and postpones the native ubus object.
+8. **Nothing has run against the real modem or the real eIM yet**: the
+   transport is tested against a fake modem replaying the recorded EC200A
+   session, and no poll cycle has reached `g-eim.com.br`.
+9. **Decided so far:**
+   * new OpenWrt-port files carry the **EBDS** copyright line;
+   * the Android daemon pieces were ported forward here (§1.1), with
+     consolidation across ports left for later;
+   * **no LuCI and no UCI**: one JSON file, maintained by an external tool,
+     with the rpcd/ubus plugin kept for status and control (§9.4);
+   * **Mbed TLS support in the HTTP client** rather than a rebuilt libcurl (§5).
 
 ## Appendix A — References
 
