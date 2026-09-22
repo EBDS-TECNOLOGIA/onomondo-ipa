@@ -29,13 +29,19 @@ SDK for a vendor fork.
    package follows libcurl's setting (*Libraries → libcurl → SSL library*): Mbed TLS, OpenWrt's default and what
    stock images ship, or OpenSSL. Other choices hide the package. Outside OpenWrt the choice is
    `-DIPA_HTTP_TLS=openssl|mbedtls` (default `openssl`).
-4. **Source.** The Makefile fetches `PKG_SOURCE_VERSION` from GitHub; pin it to a commit for a release. To
+4. **What the package builds.** The CLI `ipa` carries every SGP.32 function it has on a desktop: the eIM poll,
+   the initial eIM configuration (`-f`), memory reset (`-m`, `-p`), all ES10b triggers (`-i`, `-F`, `-b`, `-X`,
+   `-x`, `-G`, `-D`, `-P`, `-A`), both ESipa bindings, and the logging switches. Only two build options change
+   what it can do, and both are off: the consumer-eUICC emulation (`-E`, SGP.22 adaptation, not wanted here) and
+   PC/SC (`-DIPA_TRANSPORT_PCSC=OFF` for a device with no card reader). `-DSHOW_ASN_OUTPUT=ON` adds decoded
+   ASN.1 of every message at debug level, which is worth having in a test build.
+5. **Source.** The Makefile fetches `PKG_SOURCE_VERSION` from GitHub; pin it to a commit for a release. To
    build a local working tree instead:
    ```
    ln -s /path/to/onomondo-ipa/.git package/feeds/ipad/ipad/git-src
    make menuconfig    # Advanced configuration options → Enable package source tree override
    ```
-5. **Build:**
+6. **Build:**
    ```
    make package/ipad/compile V=s
    ```
