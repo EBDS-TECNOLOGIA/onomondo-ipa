@@ -37,3 +37,6 @@ int ipa_scard_set_transport(const char *uri);
 
 /*! The transport URI in use, for log messages; never NULL. */
 const char *ipa_scard_get_transport(void);
+
+/*! The schemes this build has, comma separated (e.g. "pcsc, at"), for help texts; never NULL. */
+const char *ipa_scard_transport_schemes(void);

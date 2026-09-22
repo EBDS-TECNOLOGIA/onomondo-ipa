@@ -256,15 +256,24 @@ static void transport_selection_test(void)
 {
 	printf("transport_selection_test\n");
 
+#ifdef IPA_TRANSPORT_PCSC
 	assert(ipa_scard_set_transport("pcsc:1") == 0);
 	assert(strcmp(ipa_scard_get_transport(), "pcsc:1") == 0);
+#else
+	/* Built without PC/SC, e.g. for a router: that transport is then unknown. */
+	assert(ipa_scard_set_transport("pcsc:1") < 0);
+#endif
 	assert(ipa_scard_set_transport("at:/dev/null") == 0);
 	assert(ipa_scard_set_transport("nosuch:x") < 0);
 	/* The refused URI leaves the previous selection in place. */
 	assert(strcmp(ipa_scard_get_transport(), "at:/dev/null") == 0);
-	/* NULL is the PC/SC default. */
+	/* NULL selects the default transport, which is PC/SC where it is built and AT otherwise. */
 	assert(ipa_scard_set_transport(NULL) == 0);
+#ifdef IPA_TRANSPORT_PCSC
 	assert(strcmp(ipa_scard_get_transport(), "pcsc") == 0);
+#else
+	assert(strcmp(ipa_scard_get_transport(), "at") == 0);
+#endif
 }
 
 static void open_failure_test(void)

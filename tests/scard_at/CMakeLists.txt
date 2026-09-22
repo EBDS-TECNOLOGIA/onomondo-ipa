@@ -13,6 +13,9 @@ set_property(TARGET scard_at_test PROPERTY C_STANDARD 99)
 target_compile_options(scard_at_test PRIVATE -Wall)
 # libipa for the ES10x layer, scard for the transport; the eIM side is stubbed inside the test.
 target_link_libraries(scard_at_test libipa scard ${IPA_PCSC_LIBRARY})
+if(IPA_TRANSPORT_PCSC)
+  target_compile_definitions(scard_at_test PRIVATE IPA_TRANSPORT_PCSC=1)
+endif()
 add_test(NAME scard_at_test COMMAND scard_at_test)
 
 if (M32)

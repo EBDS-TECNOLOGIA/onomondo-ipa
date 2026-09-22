@@ -123,6 +123,24 @@ ipa -T at:/dev/ttyUSB2 -c auto -n /etc/ipad/nvstate.bin -f /path/to/AddInitialEi
 /etc/init.d/ipad start
 ```
 
+## Bringing a modem up for the first time
+
+1. **See the module.** `dmesg | grep -i ttyUSB` and `ls /dev/ttyUSB*` after fitting it; `lsusb` names it.
+   `kmod-usb-serial-option` provides the serial ports.
+2. **Keep ModemManager off the port while testing:** `/etc/init.d/modemmanager stop`.
+3. **Find the AT port that passes APDUs.** Modems expose several, and not all of them answer `AT+CSIM`:
+   ```
+   for p in /dev/ttyUSB*; do echo "== $p"; ipa -T "at:$p" -c auto -n /tmp/nvstate.bin -l error -G 2>&1 | head -3; done
+   ```
+   The right one prints `eUICC EID: 89...`; the others report that they do not accept `AT+CSIM`, or say nothing
+   at all. `-G` reads one ES10b function and exits, so nothing tries to reach an eIM yet.
+4. **Write the port into the configuration** (`"transport": "at:/dev/ttyUSBx"`, `"euicc_channel": "auto"`) and
+   start the service. `ubus call ipad status` then shows the EID, and `logread -e ipad` the poll cycles.
+5. **Put ModemManager back**, on a different port from the one the IPAd uses: `/etc/init.d/modemmanager start`.
+
+If no port works, the module may refuse ISD-R access altogether, as the Fibocom NL668 does; §9.3 of the analysis
+has the AT sequence to check that by hand.
+
 ## Operation
 
 | | |

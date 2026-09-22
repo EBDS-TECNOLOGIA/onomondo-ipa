@@ -28,6 +28,22 @@ endif()
 # its own source unchanged and is compiled with its names mapped to ipa_scard_pcsc_*, so that file still merges
 # with the Android and Windows ports.
 target_sources(scard PRIVATE scard_dispatch.c scard_at.c)
+
+# A router has no card reader, and pcsc-lite is a dependency worth dropping there. Turning PC/SC off is done by
+# editing the two targets rather than src/ipa/CMakeLists.txt, so that file keeps merging with the other ports.
+option(IPA_TRANSPORT_PCSC "Build the PC/SC transport (needs pcsc-lite)" ON)
+if(IPA_TRANSPORT_PCSC)
+  target_compile_definitions(scard PRIVATE IPA_TRANSPORT_PCSC=1)
+else()
+  get_target_property(_scard_sources scard SOURCES)
+  list(REMOVE_ITEM _scard_sources scard.c)
+  set_target_properties(scard PROPERTIES SOURCES "${_scard_sources}")
+
+  get_target_property(_ipa_libs ipa LINK_LIBRARIES)
+  list(REMOVE_ITEM _ipa_libs ${PCSC_LIBRARY})
+  set_target_properties(ipa PROPERTIES LINK_LIBRARIES "${_ipa_libs}")
+endif()
+message(STATUS "PC/SC transport: ${IPA_TRANSPORT_PCSC}")
 # The rename is per source file: scard_dispatch.c and scard_at.c must see the real names.
 set_source_files_properties(scard.c PROPERTIES COMPILE_DEFINITIONS
   "ipa_scard_init=ipa_scard_pcsc_init;ipa_scard_reset=ipa_scard_pcsc_reset;ipa_scard_atr=ipa_scard_pcsc_atr;ipa_scard_transceive=ipa_scard_pcsc_transceive;ipa_scard_free=ipa_scard_pcsc_free")
@@ -42,7 +58,10 @@ set_property(TARGET ipad PROPERTY C_STANDARD 99)
 target_compile_options(ipad PRIVATE -Wall)
 target_compile_definitions(ipad PRIVATE IPAD_VERSION="${PROJECT_VERSION}")
 target_include_directories(ipad PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(ipad libipa http scard ${PCSC_LIBRARY} curl)
+target_link_libraries(ipad libipa http scard curl)
+if(IPA_TRANSPORT_PCSC)
+  target_link_libraries(ipad ${PCSC_LIBRARY})
+endif()
 if(PCSCLITE_FOUND)
   target_link_directories(ipa PRIVATE ${PCSCLITE_LIBRARY_DIRS})
   target_link_directories(ipad PRIVATE ${PCSCLITE_LIBRARY_DIRS})

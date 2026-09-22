@@ -26,12 +26,14 @@
 #include <onomondo/ipa/mem.h>
 #include "scard_at.h"
 
+#ifdef IPA_TRANSPORT_PCSC
 /* The PC/SC backend, renamed by the build; declared here rather than in scard.h, which the rename also covers. */
 void *ipa_scard_pcsc_init(unsigned int reader_num);
 int ipa_scard_pcsc_reset(void *scard_ctx);
 int ipa_scard_pcsc_atr(void *scard_ctx, struct ipa_buf *atr);
 int ipa_scard_pcsc_transceive(void *scard_ctx, struct ipa_buf *res, const struct ipa_buf *req);
 int ipa_scard_pcsc_free(void *scard_ctx);
+#endif
 
 struct scard_backend {
 	const char *scheme;
@@ -42,6 +44,7 @@ struct scard_backend {
 	int (*free)(void *ctx);
 };
 
+#ifdef IPA_TRANSPORT_PCSC
 /* The PC/SC backend takes a reader number, which the URI may carry (pcsc:2) and ipa_config.reader_num otherwise. */
 static void *pcsc_init(const char *arg, unsigned int reader_num)
 {
@@ -57,17 +60,26 @@ static void *pcsc_init(const char *arg, unsigned int reader_num)
 	}
 	return ipa_scard_pcsc_init(reader_num);
 }
+#endif
 
 static const struct scard_backend backends[] = {
+#ifdef IPA_TRANSPORT_PCSC
 	{ "pcsc", pcsc_init, ipa_scard_pcsc_reset, ipa_scard_pcsc_atr, ipa_scard_pcsc_transceive,
 	  ipa_scard_pcsc_free },
+#endif
 	{ "at", ipa_scard_at_init, ipa_scard_at_reset, ipa_scard_at_atr, ipa_scard_at_transceive,
 	  ipa_scard_at_free },
 };
 
-/* What ipa_scard_set_transport() selected: the backend and the part of the URI after the scheme. */
+/* What ipa_scard_set_transport() selected: the backend and the part of the URI after the scheme. The first entry
+ * is the default: PC/SC where it is built, the AT transport otherwise. */
 static const struct scard_backend *selected = &backends[0];
-static char transport_uri[256] = "pcsc";
+static char transport_uri[256] =
+#ifdef IPA_TRANSPORT_PCSC
+	"pcsc";
+#else
+	"at";
+#endif
 static char transport_arg[256];
 
 /* The core holds one void * per card; this is what it holds, so that the right backend is called back. */
@@ -82,8 +94,10 @@ int ipa_scard_set_transport(const char *uri)
 	size_t scheme_len;
 	unsigned int i;
 
+	/* No URI: the first backend this build has, which is PC/SC where it is built and the AT transport
+	 * otherwise. */
 	if (!uri || !*uri)
-		uri = "pcsc";
+		uri = backends[0].scheme;
 
 	colon = strchr(uri, ':');
 	scheme_len = colon ? (size_t)(colon - uri) : strlen(uri);
@@ -110,6 +124,21 @@ int ipa_scard_set_transport(const char *uri)
 const char *ipa_scard_get_transport(void)
 {
 	return transport_uri;
+}
+
+const char *ipa_scard_transport_schemes(void)
+{
+	static char schemes[64];
+	unsigned int i;
+
+	if (!schemes[0]) {
+		for (i = 0; i < IPA_ARRAY_SIZE(backends); i++) {
+			if (i)
+				strncat(schemes, ", ", sizeof(schemes) - strlen(schemes) - 1);
+			strncat(schemes, backends[i].scheme, sizeof(schemes) - strlen(schemes) - 1);
+		}
+	}
+	return schemes;
 }
 
 void *ipa_scard_init(unsigned int reader_num)

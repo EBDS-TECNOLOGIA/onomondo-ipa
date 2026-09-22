@@ -124,7 +124,9 @@ static void print_help(void)
 	printf(" -c N|auto ........... set logical channel number, or let the eUICC pick one (default: %d)\n",
 	       DEFAULT_CHANNEL_NUMBER);
 #ifdef IPA_HAVE_TRANSPORT_URI
-	printf(" -T URI .............. how to reach the eUICC: pcsc:N or at:/dev/ttyUSBx (default: pcsc)\n");
+	printf(" -T URI .............. how to reach the eUICC, e.g. at:/dev/ttyUSB2 or pcsc:0\n");
+	printf("                       (schemes in this build: %s; default: %s)\n",
+	       ipa_scard_transport_schemes(), ipa_scard_get_transport());
 	printf("                       see include/onomondo/ipa/scard_transport.h for the options\n");
 #endif
 	printf(" -f PATH ............. set initial eIM configuration\n");
@@ -569,6 +571,20 @@ int main(int argc, char **argv)
 		IPA_LOGP(SMAIN, LERROR, "IPAd initialization failed!\n");
 		rc = -EINVAL;
 		goto leave;
+	}
+
+	/* The EID proves the whole path to the eUICC works, which is what a bring-up on new hardware wants to
+	 * see before anything involves an eIM. */
+	{
+		struct ipa_ctx_info info;
+		unsigned int i;
+
+		if (ipa_get_ctx_info(ctx, &info) == 0 && info.eid_valid) {
+			printf("eUICC EID: ");
+			for (i = 0; i < sizeof(info.eid); i++)
+				printf("%02X", info.eid[i]);
+			printf("\n");
+		}
 	}
 
 	if (getopt_initial_eim_cfg_file) {
