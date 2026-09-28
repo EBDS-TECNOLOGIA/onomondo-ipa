@@ -17,12 +17,16 @@
 #include <onomondo/ipa/utils.h>
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/ipad.h>
+#include <onomondo/ipa/config_json.h>
+#include "libipa/fileio.h"
 
-#define DEFAULT_READER_NUMBER 0
-#define DEFAULT_CHANNEL_NUMBER 1
-#define DEFAULT_TAC "12345678"
-#define DEFAULT_NVSTATE_PATH "./nvstate.bin"
-#define DEFAULT_ESIPA_REQ_RETRIES 3
+/* The defaults live in config_json.h so that the CLI and the JSON
+ * configuration file (ANDROID_PORT_PLAN.md, Phase 2) cannot drift apart. */
+#define DEFAULT_READER_NUMBER IPA_DEFAULT_READER_NUMBER
+#define DEFAULT_CHANNEL_NUMBER IPA_DEFAULT_CHANNEL_NUMBER
+#define DEFAULT_TAC IPA_DEFAULT_TAC
+#define DEFAULT_NVSTATE_PATH IPA_DEFAULT_NVSTATE_PATH
+#define DEFAULT_ESIPA_REQ_RETRIES IPA_DEFAULT_ESIPA_REQ_RETRIES
 
 bool running = true;
 
@@ -58,6 +62,7 @@ static void print_help(void)
 	printf(" -I .................. disable SSL certificate verification (insecure)\n");
 	printf(" -E .................. emulate IoT eUICC (compatibility mode to use consumer eUICCs)\n");
 	printf(" -1 .................. force the IPAd to process only one eUICC package (debug, use with caution)\n");
+	printf(" -j PATH ............. run from a JSON configuration file (all other options are ignored)\n");
 	printf("\n");
 	printf(" ES10b triggers (one-shot; run once against the eUICC, then exit --\n");
 	printf(" a real device daemon calls the matching ipa_* API from onomondo/ipad.h):\n");
@@ -74,9 +79,7 @@ static void print_help(void)
 struct ipa_buf *load_ber_from_file(char *dir, char *file)
 {
 	char path[PATH_MAX] = { 0 };
-	FILE *ber_file = NULL;
 	struct ipa_buf *ber = NULL;
-	size_t ber_size;
 	int path_len;
 
 	/* Bounds-checked path build: an over-long operator-supplied path must not
@@ -90,70 +93,46 @@ struct ipa_buf *load_ber_from_file(char *dir, char *file)
 	/* Missing/unreadable file is an operator error, not an assertion: return
 	 * NULL so the caller can report and exit cleanly (assert is a no-op under
 	 * -DNDEBUG anyway). */
-	ber_file = fopen(path, "r");
-	if (!ber_file) {
+	ber = ipa_file_load(path, 1);
+	if (!ber) {
 		IPA_LOGP(SMAIN, LERROR, "cannot open BER file %s\n", path);
 		return NULL;
 	}
 
-	fseek(ber_file, 0L, SEEK_END);
-	ber_size = ftell(ber_file);
-	rewind(ber_file);
-
-	ber = ipa_buf_alloc(ber_size + 1);
-	assert(ber);
-
-	ber->len = fread(ber->data, sizeof(char), ber->data_len, ber_file);
-	fclose(ber_file);
 	IPA_LOGP(SMAIN, LINFO, "loaded BER data from file %s, size: %zu\n", path, ber->len);
 	return ber;
 }
 
 struct ipa_buf *load_nvstate_from_file(char *path)
 {
-	FILE *file_ptr = NULL;
-	struct ipa_buf *nvstate = NULL;
-	size_t file_size;
+	struct ipa_buf *nvstate;
 
-	file_ptr = fopen(path, "r");
-	if (!file_ptr) {
+	nvstate = ipa_file_load(path, 0);
+	if (!nvstate) {
 		IPA_LOGP(SMAIN, LERROR, "unable to load nvstate from file %s -- a new nvstate will be created.\n",
 			 path);
 		return NULL;
 	}
 
-	fseek(file_ptr, 0L, SEEK_END);
-	file_size = ftell(file_ptr);
-	rewind(file_ptr);
-
-	nvstate = ipa_buf_alloc(file_size);
-	assert(nvstate);
-
-	nvstate->len = fread(nvstate->data, sizeof(char), nvstate->data_len, file_ptr);
-	fclose(file_ptr);
 	IPA_LOGP(SMAIN, LINFO, "loaded nvstate from file %s, size: %zu\n", path, nvstate->data_len);
-
 	return nvstate;
 }
 
 void save_nvstate_to_file(char *path, struct ipa_buf *nvstate)
 {
-	FILE *file_ptr = NULL;
-
-	file_ptr = fopen(path, "w");
-	if (!file_ptr) {
+	if (ipa_file_save(path, nvstate) < 0) {
 		IPA_LOGP(SMAIN, LERROR, "unable to save nvstate from file %s!\n", path);
 		return;
 	}
 
-	fwrite(nvstate->data, sizeof(char), nvstate->data_len, file_ptr);
-	fclose(file_ptr);
 	IPA_LOGP(SMAIN, LINFO, "saved nvstate to file %s, size: %zu\n", path, nvstate->data_len);
 }
 
 static void sig_usr1(int signum)
 {
 	running = false;
+	/* Also stops a poll loop started via -j (ipa_run_from_config). */
+	ipa_run_stop();
 }
 
 /* One-shot ES10b trigger actions selectable from the command line.  These map
@@ -239,6 +218,7 @@ int main(int argc, char **argv)
 	bool getopt_one_euicc_pkg_only = false;
 	enum getopt_action getopt_action = ACTION_NONE;
 	char *getopt_default_dp = NULL;
+	char *getopt_config_path = NULL;
 
 	signal(SIGUSR1, sig_usr1);
 
@@ -252,7 +232,7 @@ int main(int argc, char **argv)
 
 	/* Overwrite configuration values with user defined parameters */
 	while (1) {
-		opt = getopt(argc, argv, "ht:e:r:c:f:mn:C:SIEy:a1RiFbXxGD:");
+		opt = getopt(argc, argv, "ht:e:r:c:f:mn:C:SIEy:a1RiFbXxGD:j:");
 		if (opt == -1)
 			break;
 
@@ -328,11 +308,21 @@ int main(int argc, char **argv)
 			getopt_action = ACTION_SET_DEFAULT_DP;
 			getopt_default_dp = optarg;
 			break;
+		case 'j':
+			getopt_config_path = optarg;
+			break;
 		default:
 			printf("unhandled option: %c!\n", opt);
 			break;
 		};
 	}
+
+	/* -j takes over completely: the run parameters then come from the JSON
+	 * file through the same entry point the Android daemon and the APK use
+	 * (ANDROID_PORT_PLAN.md, Phase 2), so mixing it with the flags above
+	 * would just be two sources of truth for the same settings. */
+	if (getopt_config_path)
+		return ipa_run_from_config(getopt_config_path);
 
 	/* Display current config */
 	printf("parameter:\n");

@@ -1,0 +1,5 @@
+chained modem, short body          body=  21 -> got   21 bytes, 1 GET RESPONSE call(s) -- OK
+assembled modem, short body        body=  21 -> got   21 bytes, 0 GET RESPONSE call(s) -- OK
+chained modem, multi block         body= 600 -> got  600 bytes, 3 GET RESPONSE call(s) -- OK
+assembled modem, large body        body= 600 -> got  600 bytes, 0 GET RESPONSE call(s) -- OK
+all es10x chaining cases passed

@@ -41,6 +41,11 @@
 #define MAX_BLOCKSIZE_TX 255
 #define MAX_BLOCKSIZE_RX 256
 
+/* Upper bound for an ES10x response that arrives in one piece because the
+ * transport assembled the ISO 61xx GET RESPONSE chain itself (see
+ * send_es10x_block()).  Sized for a whole ES10x body, not a single block. */
+#define MAX_INLINE_RES_RX 8192
+
 #ifdef __APPLE__
 #define MAX_GET_RESPONSE_CHUNK_RX 21
 #else
@@ -59,9 +64,23 @@ struct req_apdu {
 
 struct res_apdu {
 	uint16_t le;
-	uint8_t data[255];
+	uint8_t data[MAX_BLOCKSIZE_RX];
 	uint16_t sw;
 };
+
+/* Effective ES10x logical-channel number to OR into the CLA byte.
+ *
+ * With a PC/SC transport the core owns the channel, so this is the configured
+ * euicc_channel.  When the transport manages the channel itself (Android
+ * telephony / OMAPI, ANDROID_PORT_PLAN.md Phase 1) the APDUs leave our code on
+ * the basic channel (channel bits = 0) and the transport rewrites the CLA to
+ * the framework-assigned channel, so we must not add any channel bits here. */
+static uint8_t es10x_channel(const struct ipa_context *ctx)
+{
+	if (ipa_scard_manages_channel(ctx->scard_ctx))
+		return 0;
+	return ctx->cfg->euicc_channel;
+}
 
 /* Format the given req_apdu struct into an IPA_BUF that contains the APDU
  * bytes to send. */
@@ -106,34 +125,93 @@ static struct ipa_buf *format_req_apdu(const struct req_apdu *req_apdu)
  * struct (res_apdu) */
 static int parse_res_apdu(struct res_apdu *res_apdu, const struct ipa_buf *res_encoded)
 {
+	size_t payload_len;
+
 	memset(res_apdu, 0, sizeof(*res_apdu));
 
 	/* The encoded response should at least contain 2 byte status word */
 	if (res_encoded->len < 2)
 		return -EINVAL;
 
-	res_apdu->le = res_encoded->len - 2;
-	if (res_apdu->le)
-		memcpy(res_apdu->data, res_encoded->data, res_apdu->le);
+	payload_len = res_encoded->len - 2;
 
-	res_apdu->sw = res_encoded->data[res_apdu->le] << 8;
-	res_apdu->sw |= res_encoded->data[res_apdu->le + 1];
+	/* Refuse rather than truncate: every caller of this function reads one
+	 * block, so a payload that does not fit is not the response we asked
+	 * for.  Callers that must cope with an assembled (multi-block) response
+	 * use split_res_apdu() instead. */
+	if (payload_len > sizeof(res_apdu->data))
+		return -EINVAL;
+
+	res_apdu->le = (uint16_t) payload_len;
+	if (payload_len)
+		memcpy(res_apdu->data, res_encoded->data, payload_len);
+
+	res_apdu->sw = res_encoded->data[payload_len] << 8;
+	res_apdu->sw |= res_encoded->data[payload_len + 1];
 
 	return 0;
 }
 
-static int send_es10x_block(struct ipa_context *ctx, uint16_t *sw,
+/* Locate the payload and the status word of a raw response without copying
+ * anything, so the payload may be of any length.  Used on the STORE DATA path,
+ * where a modem/RIL that assembles 61xx chaining on our behalf returns the
+ * entire ES10x body in one response. */
+static int split_res_apdu(const struct ipa_buf *res_encoded, uint16_t *sw,
+			  const uint8_t **payload, size_t *payload_len)
+{
+	if (res_encoded->len < 2)
+		return -EINVAL;
+
+	*payload_len = res_encoded->len - 2;
+	*payload = res_encoded->data;
+	*sw = res_encoded->data[*payload_len] << 8;
+	*sw |= res_encoded->data[*payload_len + 1];
+
+	return 0;
+}
+
+/* Append received data to the (growable) ES10x response buffer. */
+static void append_es10x_res(struct ipa_buf **es10x_res, const uint8_t *data, size_t len)
+{
+	struct ipa_buf *buf = *es10x_res;
+	size_t realloc_size;
+
+	if (len == 0)
+		return;
+
+	if (buf->len + len > buf->data_len) {
+		realloc_size = ((buf->len + len) / IPA_LEN_EUICC_BUF + 1) * IPA_LEN_EUICC_BUF;
+
+		IPA_LOGP(SEUICC, LDEBUG,
+			 "eUICC response buffer exhausted, reallocating more memory (have: %zu bytes, required: %zu bytes, will allocate: %zu bytes)\n",
+			 buf->data_len, buf->len + len, realloc_size);
+
+		buf = ipa_buf_realloc(buf, realloc_size);
+		assert(buf);
+	}
+
+	memcpy(buf->data + buf->len, data, len);
+	buf->len += len;
+	*es10x_res = buf;
+}
+
+static int send_es10x_block(struct ipa_context *ctx, uint16_t *sw, struct ipa_buf **es10x_res,
 			    const struct ipa_buf *es10x_req, size_t offset, uint8_t block_nr)
 {
 	size_t len_req;
 	int rc;
 	struct req_apdu req_apdu = { 0 };
-	struct res_apdu res_apdu = { 0 };
 	struct ipa_buf *buf_req = NULL;
 	struct ipa_buf *buf_res = NULL;
-	uint8_t channel = ctx->cfg->euicc_channel;
+	uint8_t channel = es10x_channel(ctx);
+	const uint8_t *payload = NULL;
+	size_t payload_len = 0;
 
-	buf_res = ipa_buf_alloc(MAX_BLOCKSIZE_TX + 2);
+	/* A STORE DATA response normally carries no payload (the body is
+	 * fetched afterwards with GET RESPONSE), but a modem/RIL that assembles
+	 * the 61xx chain for us returns the whole ES10x body right here, so the
+	 * buffer has to be able to hold one. */
+	buf_res = ipa_buf_alloc(MAX_INLINE_RES_RX);
 	assert(buf_res);
 
 	len_req = es10x_req->len - offset;
@@ -163,13 +241,29 @@ static int send_es10x_block(struct ipa_context *ctx, uint16_t *sw,
 	}
 
 	/* parse response */
-	rc = parse_res_apdu(&res_apdu, buf_res);
+	rc = split_res_apdu(buf_res, sw, &payload, &payload_len);
 	if (rc < 0) {
 		IPA_LOGP(SEUICC, LERROR,
 			 "invalid response while sending ES10x block %u, offset=%zu\n", block_nr, offset);
 		goto exit;
 	}
-	*sw = res_apdu.sw;
+
+	/* Keep any payload that came back with the STORE DATA response.  On a
+	 * transport that exposes ISO 61xx chaining there is none and this is a
+	 * no-op; on one that assembles the chain itself this is the only copy of
+	 * the response we will ever see.  euicc_transceive_es10x() decides from
+	 * the status word whether it still has to run the GET RESPONSE loop. */
+	if (payload_len) {
+		if (buf_res->len == buf_res->data_len) {
+			IPA_LOGP(SEUICC, LERROR,
+				 "ES10x response filled the receive buffer (%zu bytes) exactly, it may have been clipped by the transport\n",
+				 buf_res->data_len);
+		}
+		append_es10x_res(es10x_res, payload, payload_len);
+		IPA_LOGP(SEUICC, LDEBUG,
+			 "transport returned %zu bytes of response data with ES10x block %u (61xx chain assembled by the transport)\n",
+			 payload_len, block_nr);
+	}
 
 	IPA_LOGP(SEUICC, LINFO, "successfully sent ES10x block %u, offset=%zu, sw=%04x\n", block_nr, offset, *sw);
 
@@ -189,9 +283,8 @@ static int recv_es10x_block(struct ipa_context *ctx, uint16_t *sw,
 	struct res_apdu res_apdu = { 0 };
 	struct ipa_buf *buf_req = NULL;
 	struct ipa_buf *buf_res = NULL;
-	uint8_t channel = ctx->cfg->euicc_channel;
+	uint8_t channel = es10x_channel(ctx);
 	struct ipa_buf *es10x_res_ptr = *es10x_res;
-	size_t realloc_size;
 
 	/* We only support channel 0-3 */
 	assert(channel <= 3);
@@ -244,20 +337,7 @@ static int recv_es10x_block(struct ipa_context *ctx, uint16_t *sw,
 		rc = -EINVAL;
 		goto exit;
 	}
-	if (es10x_res_ptr->len + res_apdu.le > es10x_res_ptr->data_len) {
-		realloc_size = ((es10x_res_ptr->len + res_apdu.le) / IPA_LEN_EUICC_BUF + 1) * IPA_LEN_EUICC_BUF;
-
-		IPA_LOGP(SEUICC, LDEBUG,
-			 "eUICC response buffer exhausted, reallocating more memory (have: %zu bytes, required: %zu bytes, will allocate: %zu bytes)\n",
-			 es10x_res_ptr->data_len, es10x_res_ptr->len + res_apdu.le, realloc_size);
-
-		/* Reallocate the buffer with enough space for one additional block of size MAX_BLOCKSIZE_RX */
-		es10x_res_ptr = ipa_buf_realloc(es10x_res_ptr, realloc_size);
-		assert(es10x_res_ptr);
-	}
-
-	memcpy(es10x_res_ptr->data + es10x_res_ptr->len, res_apdu.data, res_apdu.le);
-	es10x_res_ptr->len += res_apdu.le;
+	append_es10x_res(&es10x_res_ptr, res_apdu.data, res_apdu.le);
 	*sw = res_apdu.sw;
 
 	IPA_LOGP(SEUICC, LINFO,
@@ -462,7 +542,7 @@ static int euicc_transceive_es10x(struct ipa_context *ctx, struct ipa_buf **es10
 	int rc;
 
 	while (1) {
-		rc = send_es10x_block(ctx, &sw, es10x_req, offset, block_nr);
+		rc = send_es10x_block(ctx, &sw, es10x_res, es10x_req, offset, block_nr);
 		if (rc < 0)
 			return -EIO;
 		offset += rc;
@@ -492,7 +572,17 @@ static int euicc_transceive_es10x(struct ipa_context *ctx, struct ipa_buf **es10
 	/* When the transfer of the ES10x request is done, we expect the eUICC
 	 * to answer with a response. */
 	if (sw == 0x9000) {
-		IPA_LOGP(SEUICC, LINFO, "ES10x transmission successful, sw=%04x\n", sw);
+		/* Either the command genuinely has no response body, or the
+		 * transport already assembled it for us and handed it over with
+		 * the final STORE DATA instead of signalling 61xx.  Both are
+		 * complete at this point; there is nothing left to fetch. */
+		if ((*es10x_res)->len > 0) {
+			IPA_LOGP(SEUICC, LINFO,
+				 "ES10x transmission successful, sw=%04x (%zu bytes of response data assembled by the transport)\n",
+				 sw, (*es10x_res)->len);
+		} else {
+			IPA_LOGP(SEUICC, LINFO, "ES10x transmission successful, sw=%04x\n", sw);
+		}
 		return 0;
 	} else if ((sw & 0xff00) == 0x6100) {
 		block_nr = 0;
@@ -632,7 +722,7 @@ static int select_isd_r(struct ipa_context *ctx)
 	struct res_apdu res_apdu = { 0 };
 	struct ipa_buf *buf_req = NULL;
 	struct ipa_buf *buf_res = NULL;
-	uint8_t channel = ctx->cfg->euicc_channel;
+	uint8_t channel = es10x_channel(ctx);
 
 	/* We only support channel 0-3 */
 	assert(channel <= 3);
@@ -686,7 +776,7 @@ static int manage_channel(struct ipa_context *ctx, bool close)
 	struct res_apdu res_apdu = { 0 };
 	struct ipa_buf *buf_req = NULL;
 	struct ipa_buf *buf_res = NULL;
-	uint8_t channel = ctx->cfg->euicc_channel;
+	uint8_t channel = es10x_channel(ctx);
 
 	/* We only support channel 0-3 */
 	assert(channel <= 3);
@@ -750,6 +840,21 @@ int ipa_euicc_init_es10x(struct ipa_context *ctx)
 {
 	int rc;
 
+	/* When the transport owns the logical channel (Android telephony /
+	 * OMAPI), channel setup -- TERMINAL CAPABILITY (basic channel), MANAGE
+	 * CHANNEL and the ISD-R SELECT -- is performed by the transport itself when
+	 * ipa_scard_init() opens the channel, not here.  NB: a phone modem's
+	 * power-on TERMINAL CAPABILITY does NOT reliably advertise device-LPA
+	 * support -- a Thales "GTO" eUICC rejected every ES10 command with SW=6985
+	 * until TERMINAL CAPABILITY was (re)sent -- so the Android backend sends it
+	 * explicitly on the basic channel (see EuiccChannel.openChannel), validated
+	 * by the Phase-1 hardware spike.  Issuing any of that here would be
+	 * basic-channel or wrong-channel APDUs, so this is a no-op. */
+	if (ipa_scard_manages_channel(ctx->scard_ctx)) {
+		IPA_LOGP(SEUICC, LINFO, "transport manages the ES10x channel; skipping termcap/MANAGE CHANNEL/SELECT ISD-R\n");
+		return 0;
+	}
+
 	rc = send_termcap(ctx);
 	if (rc < 0)
 		return rc;
@@ -767,5 +872,10 @@ int ipa_euicc_init_es10x(struct ipa_context *ctx)
  *  \returns 0 on success, negative on error. */
 int ipa_euicc_close_es10x(struct ipa_context *ctx)
 {
+	/* The transport closes the logical channel itself (on ipa_scard_free);
+	 * a MANAGE CHANNEL from here would go to the wrong place. */
+	if (ipa_scard_manages_channel(ctx->scard_ctx))
+		return 0;
+
 	return manage_channel(ctx, true);
 }

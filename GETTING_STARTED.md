@@ -75,6 +75,17 @@ pcsc_scan
 ./build/src/ipa/ipa -r <reader_num>
 ```
 
+All of the above can come from a JSON file instead of flags:
+
+```bash
+cp contrib/ipa-config.example.json /etc/ipa/config.json   # then edit it
+./build/src/ipa/ipa -j /etc/ipa/config.json
+```
+
+`-j` ignores the other flags and drives the same `ipa_run_from_config()` entry
+point the Android daemon and APK use.  One key per flag; unknown or malformed
+keys are refused with a log line naming them.
+
 For testing against a consumer eUICC (not an IoT eUICC) add `-E` to enable
 emulation mode.  **Note**: `-E` against a strict v1.2 eIM may fail because
 the consumer-emulation signing-input change (§2.11.2.1) is still a TODO —

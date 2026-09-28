@@ -200,6 +200,14 @@ error:
 	return -EIO;
 }
 
+/*! PC/SC transport manages the logical channel in the core (MANAGE CHANNEL +
+ *  ISD-R SELECT + CLA channel bits), so this always returns false. */
+bool ipa_scard_manages_channel(void *scard_ctx)
+{
+	(void)scard_ctx;
+	return false;
+}
+
 /*! Free smartcard reader (and card).
  *  \param[inout] scard_ctx smartcard reader context.
  *  \returns 0 on success, -EIO on failure. */

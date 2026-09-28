@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & Iapyx Informatica Ltda. All rights reserved.
+# Copyright (c) 2026 Onomondo ApS & sysmocom - s.f.m.c. GmbH & EBDS Tecnologia Ltda. All rights reserved.
 #
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# Cross-build the native dependencies (OpenSSL + libcurl, static) that
-# libipacore.so links against, for one Android ABI, using the NDK.
-# See ANDROID_PORT_PLAN.md, Phase 0.
+# Cross-build the native dependencies (OpenSSL + libcurl + jansson, static)
+# that libipacore.so links against, for one Android ABI, using the NDK.
+# See ANDROID_PORT_PLAN.md, Phase 0 (OpenSSL/curl) and Phase 2 (jansson).
 #
 # This mirrors the Configure/configure flags used by
 # https://github.com/ibaoger/libcurl-android but drives the upstream *release*
@@ -23,7 +23,12 @@
 #   install-prefix   where headers+libs land (default: ./build-android-deps/<abi>)
 #
 # Env overrides: API (default 26), OPENSSL_VER (default 3.5.7),
-#                CURL_VER (default 8.21.0), JOBS (default nproc).
+#                CURL_VER (default 8.21.0), JANSSON_VER (default 2.14.1),
+#                JOBS (default nproc).
+#
+# jansson is not optional on Android: since Phase 2 the daemon and the APK are
+# configured from a JSON file, and without jansson ipa_config_json_load() fails
+# and neither front-end can start.
 #
 # Feed the resulting prefix to the project build via:
 #   cmake -S . -B build-android \
@@ -37,6 +42,7 @@ ABI="${1:-arm64-v8a}"
 API="${API:-26}"
 OPENSSL_VER="${OPENSSL_VER:-3.5.7}"
 CURL_VER="${CURL_VER:-8.21.0}"
+JANSSON_VER="${JANSSON_VER:-2.14.1}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
 
 if [ -z "${NDK_ROOT:-}" ]; then
@@ -107,6 +113,21 @@ tar -xzf "$WORK/curl-$CURL_VER.tar.gz" -C "$WORK/curl-$ABI" --strip-components=1
   make -C lib install
   make -C include install )
 
+echo "==================== jansson $JANSSON_VER ($ABI) ===================="
+fetch "https://github.com/akheron/jansson/releases/download/v$JANSSON_VER/jansson-$JANSSON_VER.tar.gz" \
+	"$WORK/jansson-$JANSSON_VER.tar.gz"
+rm -rf "$WORK/jansson-$ABI"; mkdir -p "$WORK/jansson-$ABI"
+tar -xzf "$WORK/jansson-$JANSSON_VER.tar.gz" -C "$WORK/jansson-$ABI" --strip-components=1
+( cd "$WORK/jansson-$ABI"
+  export CC="$BIN/${CC_TRIPLE}${API}-clang"
+  export AR="$BIN/llvm-ar" RANLIB="$BIN/llvm-ranlib"
+  export CFLAGS="$ABI_CFLAGS -fPIC"
+  ./configure --host="$HOST" --prefix="$PREFIX" \
+      --enable-static --disable-shared
+  make -j"$JOBS"
+  make install )
+
 echo "==================== done ($ABI) ===================="
 echo "prefix: $PREFIX"
-ls -la "$PREFIX"/lib*/libssl.a "$PREFIX"/lib*/libcrypto.a "$PREFIX"/lib/libcurl.a 2>/dev/null || true
+ls -la "$PREFIX"/lib*/libssl.a "$PREFIX"/lib*/libcrypto.a "$PREFIX"/lib/libcurl.a \
+       "$PREFIX"/lib/libjansson.a 2>/dev/null || true
