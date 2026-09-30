@@ -13,10 +13,9 @@
  * UPDATE for v1.1: 5.14.5 / 6.3.2.6 — GetEimPackage request/response changed:
  *   - Request adds optional stateChangeCause (tag [1]) and shifts rPLMN to [2].
  *   - Response gains eidNotFound(2), invalidEid(3), missingEid(4) errors.
- *   The IPA should populate stateChangeCause when polling the eIM after a
- *   local state change (Fallback, Emergency swap, immediate-enable, reset,
- *   another eIM modified state).  TODO v1.1: thread a cause value down from
- *   ipad.c into ipa_esipa_get_eim_pkg().
+ *   Done: ipa_esipa_note_state_change() records the cause at each local state
+ *   change and esipa_get_eim_pkg.c reports it on the next poll, so nothing has
+ *   to be threaded through this file.
  * UPDATE for v1.1: 3.5.2 — "More error conditions specified in the procedure".
  *   Review v1.2 §3.5.2 for new failure modes the retrieval loop should handle.
  * UPDATE for v1.1: 3.2.3.1 — Start Conditions changed.  The preconditions
@@ -46,6 +45,7 @@
 #include "proc_cmn_cancel_sess.h"
 #include "proc_indirect_prfle_dwnld.h"
 #include "proc_euicc_pkg_dwnld_exec.h"
+#include "esipa_prvde_eim_pkg_rslt.h"
 #include "proc_euicc_data_req.h"
 #include "proc_eim_pkg_retr.h"
 
@@ -56,7 +56,7 @@ static int get_euicc_ci_pkid(struct ipa_context *ctx, struct ipa_buf **pkid)
 
 	*pkid = NULL;
 
-	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx);
+	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx, ctx->eim_id);
 	if (!eim_cfg_data) {
 		IPA_LOGP(SIPA, LERROR, "cannot read EimConfigurationData from eUICC\n");
 		goto error;
@@ -83,7 +83,10 @@ error:
 int eim_pkg_exec(struct ipa_context *ctx, const struct ipa_esipa_get_eim_pkg_res *get_eim_pkg_res)
 {
 	struct ipa_buf *allowed_ca_pkid = NULL;
-	int rc;
+	/* Pre-existing, unrelated to the error reporting below: the euiccPackageRequest branch reaches the
+	 * error label without ever assigning rc, so the function returned an indeterminate value.  Visible
+	 * only under NDEBUG, where the assert() above that goto disappears. */
+	int rc = -EINVAL;
 
 	if (get_eim_pkg_res->euicc_package_request) {
 		/* This must not happen. The internal logic in ipad_poll must make sure that
@@ -111,11 +114,22 @@ int eim_pkg_exec(struct ipa_context *ctx, const struct ipa_esipa_get_eim_pkg_res
 			goto error;
 	} else if (get_eim_pkg_res->dwnld_trigger_request) {
 		struct ipa_proc_indirect_prfle_dwnlod_pars indirect_prfle_dwnlod_pars = { 0 };
+		/* SGP.32, section 5.14.1 / 6.3.2.7: the eIM identifies the operation it dispatched by this id,
+		 * so it has to be echoed on the way back -- on the result and, just as much, on a rejection.
+		 * Read once here because both of the step 3 checks below report with it. */
+		const TransactionId_t *eim_transaction_id = get_eim_pkg_res->dwnld_trigger_request->eimTransactionId;
+
 		if (!get_eim_pkg_res->dwnld_trigger_request->profileDownloadData) {
 			/* In case the IPA capability eimDownloadDataHandling used, profileDownloadData would not be
-			 * present. However, this is feature this IPAd implementation does not support. */
+			 * present. However, this is feature this IPAd implementation does not support.
+			 *
+			 * Section 3.2.3.2 step 3 lets a conforming IPA continue at step 5 with an empty trigger,
+			 * relying on the eIM-handled Activation Code or on a default SM-DP+ address. This IPAd has
+			 * neither, so for it the same step's other clause applies: "data needed by IPA to perform
+			 * the profile download is missing the IPA SHALL return invalidPackageFormat error". */
 			IPA_LOGP(SIPA, LERROR,
 				 "the ProfileDownloadTriggerRequest does not contain ProfileDownloadData -- cannot continue!\n");
+			ipa_esipa_report_eim_pkg_err(ctx, EimPackageResultErrorCode_invalidPackageFormat, eim_transaction_id);
 			rc = -EINVAL;
 			goto error;
 		}
@@ -124,28 +138,55 @@ int eim_pkg_exec(struct ipa_context *ctx, const struct ipa_esipa_get_eim_pkg_res
 			/* (see comment above) */
 			IPA_LOGP(SIPA, LERROR,
 				 "the ProfileDownloadData does not contain an activationCode -- cannot continue!\n");
+			ipa_esipa_report_eim_pkg_err(ctx, EimPackageResultErrorCode_invalidPackageFormat, eim_transaction_id);
 			rc = -EINVAL;
 			goto error;
 		}
 
 		rc = get_euicc_ci_pkid(ctx, &allowed_ca_pkid);
 		if (rc < 0) {
+			/* The trigger was usable; this IPA could not read what it needs from its own eUICC.
+			 * undefinedError says exactly that -- the package is not at fault, so the eIM should
+			 * not be told it was malformed. */
+			ipa_esipa_report_eim_pkg_err(ctx, EimPackageResultErrorCode_undefinedError,
+						     eim_transaction_id);
 			rc = -EINVAL;
 			goto error;
 		}
 
 		indirect_prfle_dwnlod_pars.allowed_ca = allowed_ca_pkid;
 		indirect_prfle_dwnlod_pars.tac = ctx->cfg->tac;
+		/* SGP.32, section 5.14.1: the eIM identifies the session by the eimTransactionId it sent here, so
+		 * it has to travel all the way to ESipa.InitiateAuthentication. It is OPTIONAL, and absent when
+		 * the eIM does not use one. */
+		indirect_prfle_dwnlod_pars.eim_transaction_id = eim_transaction_id;
 		indirect_prfle_dwnlod_pars.ac =
 		    IPA_STR_FROM_ASN(&get_eim_pkg_res->dwnld_trigger_request->profileDownloadData->
 				     choice.activationCode);
 		rc = ipa_proc_indirect_prfle_dwnlod(ctx, &indirect_prfle_dwnlod_pars);
 		IPA_FREE((void *)indirect_prfle_dwnlod_pars.ac);
+		if (rc == -EBADMSG) {
+			/* Section 3.2.3.2 step 4: the Activation Code the eIM sent could not be parsed. That is
+			 * still an eIM Package the IPA cannot use, and step 4 asks for the same error code as
+			 * step 3. Reported from here rather than from inside the sub-procedure: everything past
+			 * step 5 belongs to the RSP session and fails through the cancel-session path instead,
+			 * so the sub-procedure only has to say which of the two kinds of failure it hit. */
+			IPA_LOGP(SIPA, LERROR,
+				 "the activationCode in the ProfileDownloadTriggerRequest could not be parsed -- cannot continue!\n");
+			ipa_esipa_report_eim_pkg_err(ctx, EimPackageResultErrorCode_invalidPackageFormat, eim_transaction_id);
+			goto error;
+		}
 		if (rc < 0)
 			goto error;
 	} else {
 		IPA_LOGP(SIPA, LERROR,
 			 "the GetEimPackageResponse contains an unsupported request -- cannot continue!\n");
+		/* unknownPackage is the code for this and not invalidPackageFormat: the response parsed, it
+		 * simply asked for something this IPA does not implement -- "The eIM Package is not supported
+		 * by the IPA", as SGP.32 section 5.14.4 Table 15a glosses the same code.  No eimTransactionId
+		 * to echo: the id lives inside the request type, and which one this is is the very thing that
+		 * could not be established. */
+		ipa_esipa_report_eim_pkg_err(ctx, EimPackageResultErrorCode_unknownPackage, NULL);
 		rc = -EINVAL;
 		goto error;
 	}

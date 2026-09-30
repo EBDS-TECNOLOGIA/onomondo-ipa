@@ -44,6 +44,7 @@
 #include "es10c_disable_prfle.h"
 #include "es10c_delete_prfle.h"
 #include "es10c_get_prfle_info.h"
+#include "es10b_set_default_dp_addr.h"
 #include "es10b_get_eim_cfg_data.h"
 #include "es10b_add_init_eim.h"
 #include "es10b_get_rat.h"
@@ -269,24 +270,171 @@ struct EuiccResultData *iot_emo_do_configureImmediateEnable_psmo(struct ipa_cont
 
 	/* Update immediateEnableFlag */
 	if (configureImmediateEnable_psmo->immediateEnableFlag)
-		ctx->nvstate.iot_euicc_emu.auto_enable.flag = true;
+		ctx->nvstate.iot_euicc_emu.immediate_enable.flag = true;
 	else
-		ctx->nvstate.iot_euicc_emu.auto_enable.flag = false;
+		ctx->nvstate.iot_euicc_emu.immediate_enable.flag = false;
 
 	/* Update smdpOid */
-	ipa_buf_free(ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid);
-	ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid = NULL;
+	ipa_buf_free(ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid);
+	ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid = NULL;
 	if (configureImmediateEnable_psmo->defaultSmdpOid)
-		ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid = IPA_BUF_FROM_ASN(configureImmediateEnable_psmo->defaultSmdpOid);
+		ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid = IPA_BUF_FROM_ASN(configureImmediateEnable_psmo->defaultSmdpOid);
 
 	/* Update smdpAddress */
-	ipa_buf_free(ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address);
-	ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address = NULL;
+	ipa_buf_free(ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address);
+	ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address = NULL;
 	if (configureImmediateEnable_psmo->defaultSmdpAddress)
-		ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address =
+		ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address =
 		    IPA_BUF_FROM_ASN(configureImmediateEnable_psmo->defaultSmdpAddress);
 
 	euicc_result_data->choice.configureImmediateEnableResult = ConfigureImmediateEnableResult_ok;
+
+	return euicc_result_data;
+}
+
+/* SGP.32 section 3.4.6: set the Fallback Attribute on the target Profile.
+ *
+ * The steps below follow the procedure literally, with one deliberate departure.  Step 4 has the
+ * ISD-R refuse unless the Profile carries fallbackAllowed (tag '9F67'), a flag the Profile Owner puts
+ * in the Metadata at generation time.  A consumer eUICC has no such Metadata and never reports it, so
+ * enforcing it here would make the Fallback Mechanism permanently unreachable under emulation -- the
+ * opposite of what the emulation is for.  Absence is therefore treated as permission, and said so in
+ * the log; an explicit FALSE is still refused.  The same reasoning covers the Emergency Profile check
+ * in step 4: ecallIndication never appears on a consumer eUICC either.
+ */
+struct EuiccResultData *iot_emo_do_setFallbackAttribute_psmo(struct ipa_context *ctx,
+							     const struct Psmo__setFallbackAttribute
+							     *setFallbackAttribute_psmo)
+{
+	struct EuiccResultData *euicc_result_data = IPA_ALLOC_ZERO(struct EuiccResultData);
+	struct ipa_es10c_get_prfle_info_res *get_prfle_info_res = NULL;
+	const struct SGP32_ProfileInfo *target;
+	long result = SetFallbackAttributeResult_undefinedError;
+
+	euicc_result_data->present = EuiccResultData_PR_setFallbackAttributeResult;
+
+	if (setFallbackAttribute_psmo->iccid.size != IPA_LEN_ICCID) {
+		IPA_LOGP_ES10X("LoadEuiccPackage", LERROR, "setFallbackAttribute: malformed ICCID\n");
+		result = SetFallbackAttributeResult_iccidOrAidNotFound;
+		goto leave;
+	}
+
+	get_prfle_info_res = ipa_es10c_get_prfle_info(ctx, NULL);
+
+	/* Step 2: find the target Profile. */
+	target = ipa_es10c_prfle_by_iccid(get_prfle_info_res, setFallbackAttribute_psmo->iccid.buf);
+	if (!target) {
+		IPA_LOGP_ES10X("LoadEuiccPackage", LERROR, "setFallbackAttribute: no profile with ICCID %s\n",
+			       ipa_hexdump(setFallbackAttribute_psmo->iccid.buf, IPA_LEN_ICCID));
+		result = SetFallbackAttributeResult_iccidOrAidNotFound;
+		goto leave;
+	}
+
+	/* Step 3: already the Fallback Profile -- nothing to do, and that is a success. */
+	if (!memcmp(ctx->nvstate.iot_euicc_emu.fallback_iccid, setFallbackAttribute_psmo->iccid.buf,
+		    IPA_LEN_ICCID)) {
+		result = SetFallbackAttributeResult_ok;
+		goto leave;
+	}
+
+	/* Step 4: fallbackAllowed must not be present-and-false. */
+	if (target->fallbackAllowed && !*target->fallbackAllowed) {
+		IPA_LOGP_ES10X("LoadEuiccPackage", LERROR,
+			       "setFallbackAttribute: the profile owner does not allow fallback\n");
+		result = SetFallbackAttributeResult_fallbackNotAllowed;
+		goto leave;
+	}
+	if (!target->fallbackAllowed)
+		IPA_LOGP_ES10X("LoadEuiccPackage", LINFO,
+			       "setFallbackAttribute: profile carries no fallbackAllowed flag, "
+			       "IoT eUICC emulation active, treating it as allowed\n");
+
+	/* Step 5: an existing Fallback Profile must be disabled before it gives up the attribute. */
+	if (IPA_EMU_FALLBACK_SET(ctx)) {
+		const struct SGP32_ProfileInfo *current =
+		    ipa_es10c_prfle_by_iccid(get_prfle_info_res, ctx->nvstate.iot_euicc_emu.fallback_iccid);
+
+		if (ipa_es10c_prfle_is_enabled(current)) {
+			IPA_LOGP_ES10X("LoadEuiccPackage", LERROR,
+				       "setFallbackAttribute: the current fallback profile is enabled\n");
+			result = SetFallbackAttributeResult_fallbackProfileEnabled;
+			goto leave;
+		}
+	}
+
+	memcpy(ctx->nvstate.iot_euicc_emu.fallback_iccid, setFallbackAttribute_psmo->iccid.buf, IPA_LEN_ICCID);
+	IPA_LOGP_ES10X("LoadEuiccPackage", LINFO, "setFallbackAttribute: fallback profile is now ICCID %s\n",
+		       ipa_hexdump(ctx->nvstate.iot_euicc_emu.fallback_iccid, IPA_LEN_ICCID));
+	result = SetFallbackAttributeResult_ok;
+
+leave:
+	ipa_es10c_get_prfle_info_res_free(get_prfle_info_res);
+	euicc_result_data->choice.setFallbackAttributeResult = result;
+	return euicc_result_data;
+}
+
+/* SGP.32 section 3.4.7: unset the Fallback Attribute, leaving no Fallback Profile on the eUICC. */
+struct EuiccResultData *iot_emo_do_unsetFallbackAttribute_psmo(struct ipa_context *ctx)
+{
+	struct EuiccResultData *euicc_result_data = IPA_ALLOC_ZERO(struct EuiccResultData);
+	struct ipa_es10c_get_prfle_info_res *get_prfle_info_res = NULL;
+	long result;
+
+	euicc_result_data->present = EuiccResultData_PR_unsetFallbackAttributeResult;
+
+	/* Step 1a: nothing carries the attribute. */
+	if (!IPA_EMU_FALLBACK_SET(ctx)) {
+		IPA_LOGP_ES10X("LoadEuiccPackage", LERROR, "unsetFallbackAttribute: no fallback profile is set\n");
+		result = UnsetFallbackAttributeResult_noFallbackAttribute;
+		goto leave;
+	}
+
+	/* Step 1b: only a disabled Fallback Profile may give up the attribute. */
+	get_prfle_info_res = ipa_es10c_get_prfle_info(ctx, NULL);
+	if (ipa_es10c_prfle_is_enabled(ipa_es10c_prfle_by_iccid(get_prfle_info_res, ctx->nvstate.iot_euicc_emu.fallback_iccid))) {
+		IPA_LOGP_ES10X("LoadEuiccPackage", LERROR,
+			       "unsetFallbackAttribute: the fallback profile is enabled\n");
+		result = UnsetFallbackAttributeResult_fallbackProfileEnabled;
+		goto leave;
+	}
+
+	memset(ctx->nvstate.iot_euicc_emu.fallback_iccid, 0, IPA_LEN_ICCID);
+	IPA_LOGP_ES10X("LoadEuiccPackage", LINFO, "unsetFallbackAttribute: no fallback profile any more\n");
+	result = UnsetFallbackAttributeResult_ok;
+
+leave:
+	ipa_es10c_get_prfle_info_res_free(get_prfle_info_res);
+	euicc_result_data->choice.unsetFallbackAttributeResult = result;
+	return euicc_result_data;
+}
+
+/* SGP.32 section 2.11.1.1.3: the eIM asks the eUICC to store a default SM-DP+ address. A real IoT
+ * eUICC does this itself while executing the package; here it is the same ES10 function the host can
+ * also drive directly, which knows how to speak to a consumer eUICC. */
+struct EuiccResultData *iot_emo_do_setDefaultDpAddress_psmo(struct ipa_context *ctx,
+							    const struct SGP32_SetDefaultDpAddressRequest
+							    *setDefaultDpAddress_psmo)
+{
+	struct EuiccResultData *euicc_result_data = IPA_ALLOC_ZERO(struct EuiccResultData);
+	char *default_dp_fqdn;
+	int rc;
+
+	euicc_result_data->present = EuiccResultData_PR_setDefaultDpAddressResult;
+
+	/* ipa_es10b_set_default_dp_addr() takes a NUL-terminated string; the PSMO carries a UTF8String
+	 * that is not NUL-terminated. */
+	default_dp_fqdn = IPA_STR_FROM_ASN(&setDefaultDpAddress_psmo->defaultDpAddress);
+	rc = ipa_es10b_set_default_dp_addr(ctx, default_dp_fqdn);
+	IPA_FREE(default_dp_fqdn);
+
+	/* The two result sets are identical, ok(0) and undefinedError(127), so a non-zero eUICC status
+	 * passes straight through; a negative transport error becomes undefinedError. */
+	if (rc == SGP32_SetDefaultDpAddressResponse__setDefaultDpAddressResult_ok)
+		euicc_result_data->choice.setDefaultDpAddressResult.setDefaultDpAddressResult =
+		    SGP32_SetDefaultDpAddressResponse__setDefaultDpAddressResult_ok;
+	else
+		euicc_result_data->choice.setDefaultDpAddressResult.setDefaultDpAddressResult =
+		    SGP32_SetDefaultDpAddressResponse__setDefaultDpAddressResult_undefinedError;
 
 	return euicc_result_data;
 }
@@ -305,7 +453,8 @@ struct EuiccResultData *iot_emo_do_addEim_eco(struct ipa_context *ctx, const str
 	euicc_result_data->choice.addEimResult.choice.addEimResultCode = AddEimResult__addEimResultCode_undefinedError;
 
 	/* Decode existing eIM configuration */
-	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx);
+	/* NULL: these rebuild or enumerate the whole eIM list, so no searchCriteria. */
+	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx, NULL);
 	if (!eim_cfg_data || !eim_cfg_data->res) {
 		IPA_LOGP_ES10X("LoadEuiccPackage", LERROR,
 			       "IoT eUICC emulation active, addEim eCO failed, unable to retrieve eimConfigurationData!\n");
@@ -381,7 +530,8 @@ struct EuiccResultData *iot_emo_do_deleteEim_eco(struct ipa_context *ctx, const 
 	euicc_result_data->choice.deleteEimResult = DeleteEimResult_undefinedError;
 
 	/* Decode existing eIM configuration */
-	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx);
+	/* NULL: these rebuild or enumerate the whole eIM list, so no searchCriteria. */
+	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx, NULL);
 	if (!eim_cfg_data || !eim_cfg_data->res) {
 		IPA_LOGP_ES10X("LoadEuiccPackage", LERROR,
 			       "IoT eUICC emulation active, deleteEim eCO failed, unable to retrieve eimConfigurationData!\n");
@@ -435,14 +585,17 @@ struct EuiccResultData *iot_emo_do_updateEim_eco(struct ipa_context *ctx,
 	struct ipa_es10b_add_init_eim_res *add_init_eim_res = NULL;
 	unsigned int i;
 	struct EimConfigurationData *eim_cfg_data_item;
-	struct EimConfigurationData *eim_cfg_data_item_updated;
+	/* NULL, because the error path below frees this unconditionally and two of the ways in reach it
+	 * without ever assigning it: the eimConfigurationData read failing, and the eIM not being found. */
+	struct EimConfigurationData *eim_cfg_data_item_updated = NULL;
 	bool eimFound = false;
 
 	euicc_result_data->present = EuiccResultData_PR_updateEimResult;
 	euicc_result_data->choice.deleteEimResult = UpdateEimResult_undefinedError;
 
 	/* Decode existing eIM configuration */
-	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx);
+	/* NULL: these rebuild or enumerate the whole eIM list, so no searchCriteria. */
+	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx, NULL);
 	if (!eim_cfg_data || !eim_cfg_data->res) {
 		IPA_LOGP_ES10X("LoadEuiccPackage", LERROR,
 			       "IoT eUICC emulation active, updateEim eCO failed, unable to retrieve eimConfigurationData!\n");
@@ -529,7 +682,8 @@ struct EuiccResultData *iot_emo_do_listEim_eco(struct ipa_context *ctx, const st
 	/* This eCO Has no parameters, so listEim_eco is just an empty struct that has to be present */
 	assert(listEim_eco);
 
-	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx);
+	/* NULL: these rebuild or enumerate the whole eIM list, so no searchCriteria. */
+	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx, NULL);
 	if (!eim_cfg_data) {
 		euicc_result_data->choice.listEimResult.present = ListEimResult_PR_listEimError;
 		/* UPDATE for v1.1: 2.11.2 - ListEimResult.listEimError dropped commandError(7);
@@ -576,6 +730,15 @@ struct ipa_es10b_load_euicc_pkg_res *load_euicc_pkg_iot_emu(struct ipa_context *
 	struct ipa_buf eim_id = { 0 };
 	struct ipa_buf euicc_sign_epr = { 0 };
 	unsigned int i;
+	/* euiccSignEPR is a placeholder, not a signature.  SGP.32 section 2.11.2.1 has the eUICC sign
+	 * euiccPackageResultDataSigned concatenated with the associationToken using SK.EUICC.ECDSA, and
+	 * section 5.14.6 has the eIM verify it against PK.EUICC.ECDSA and "discard the input" when it does
+	 * not check out.  Neither this code nor any other part of libipa can produce that signature: the
+	 * private key never leaves the eUICC, and SGP.22 ES10 has no function that signs caller-supplied
+	 * bytes, only ones that sign structures the eUICC assembles itself (euiccSigned1, euiccSigned2,
+	 * euiccCancelSessionSigned, euiccSignPIR).  So an eUICC Package executed under the emulation cannot
+	 * have its result accepted by a conforming eIM.  Fixing the byte pattern would not change that;
+	 * see README, "IoT eUICC emulation". */
 	const uint8_t euiccSignEPR_dummy[64] = { "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS" };
 
 	IPA_LOGP_ES10X("LoadEuiccPackage", LINFO,
@@ -598,7 +761,13 @@ struct ipa_es10b_load_euicc_pkg_res *load_euicc_pkg_iot_emu(struct ipa_context *
 		asn->choice.euiccPackageResultSigned.euiccPackageResultDataSigned.eimTransactionId =
 		    ipa_asn1c_dup(&asn_DEF_TransactionId, req->req.euiccPackageSigned.eimTransactionId);
 	}
-	asn->choice.euiccPackageResultSigned.euiccPackageResultDataSigned.seqNumber = 0;
+	/* SGP.32 section 5.14.6: the eIM discards a result whose sequence number is not greater than the
+	 * one it expects, so this has to move on with every result.  A real IoT eUICC takes it from the
+	 * counter it also uses for Notifications; the consumer eUICC underneath cannot, so the emulation
+	 * counts here instead.  See ipa_nvstate.iot_euicc_emu.epr_seq_number for why this number must not
+	 * leave the eIM conversation. */
+	asn->choice.euiccPackageResultSigned.euiccPackageResultDataSigned.seqNumber =
+	    ++ctx->nvstate.iot_euicc_emu.epr_seq_number;
 	ipa_buf_assign(&euicc_sign_epr, euiccSignEPR_dummy, sizeof(euiccSignEPR_dummy));
 	IPA_COPY_IPA_BUF_TO_ASN(&asn->choice.euiccPackageResultSigned.euiccSignEPR, &euicc_sign_epr);
 
@@ -633,6 +802,17 @@ struct ipa_es10b_load_euicc_pkg_res *load_euicc_pkg_iot_emu(struct ipa_context *
 			case Psmo_PR_configureImmediateEnable:
 				psmo_result =
 				    iot_emo_do_configureImmediateEnable_psmo(ctx, &psmo->choice.configureImmediateEnable);
+				break;
+			case Psmo_PR_setFallbackAttribute:
+				psmo_result =
+				    iot_emo_do_setFallbackAttribute_psmo(ctx, &psmo->choice.setFallbackAttribute);
+				break;
+			case Psmo_PR_unsetFallbackAttribute:
+				psmo_result = iot_emo_do_unsetFallbackAttribute_psmo(ctx);
+				break;
+			case Psmo_PR_setDefaultDpAddress:
+				psmo_result =
+				    iot_emo_do_setDefaultDpAddress_psmo(ctx, &psmo->choice.setDefaultDpAddress);
 				break;
 			default:
 				IPA_LOGP_ES10X("LoadEuiccPackage", LERROR, "ignoring invalid or unsupported PSMO!\n");
@@ -684,6 +864,17 @@ error:
 	asn->present = EuiccPackageResult_PR_euiccPackageErrorUnsigned;
 	ipa_buf_assign(&eim_id, (uint8_t *) ctx->eim_id, strlen(ctx->eim_id));
 	IPA_COPY_IPA_BUF_TO_ASN(&asn->choice.euiccPackageErrorUnsigned.eimId, &eim_id);
+	/* UPDATE for v1.1: 2.11.2 — the echo rule names this branch explicitly: "If it was included in the
+	 * signed eUICC Package, the eUICC SHALL include the same eimTransactionId in the signed eUICC
+	 * Package Result and also euiccPackageErrorUnsigned and euiccPackageErrorSigned in case of
+	 * errors."  It is the eUICC's obligation, and under the emulation this function is the eUICC.  The
+	 * success branch above has always done it; without it here, a failed eUICC Package is the one
+	 * outcome the eIM cannot match to the package it sent -- exactly when it most needs to, since it
+	 * has to decide whether to retry. */
+	if (req->req.euiccPackageSigned.eimTransactionId) {
+		asn->choice.euiccPackageErrorUnsigned.eimTransactionId =
+		    ipa_asn1c_dup(&asn_DEF_TransactionId, req->req.euiccPackageSigned.eimTransactionId);
+	}
 	return res;
 }
 
@@ -750,7 +941,7 @@ struct ipa_es10b_load_euicc_pkg_res *ipa_es10b_load_euicc_pkg(struct ipa_context
 {
 	struct ipa_es10b_load_euicc_pkg_res *res;
 
-	if (ctx->cfg->iot_euicc_emu_enabled)
+	if (IPA_EUICC_EMU(ctx))
 		res = load_euicc_pkg_iot_emu(ctx, req);
 	else
 		res = load_euicc_pkg(ctx, req);

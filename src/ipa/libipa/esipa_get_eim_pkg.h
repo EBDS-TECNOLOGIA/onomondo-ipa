@@ -22,4 +22,20 @@ struct ipa_esipa_get_eim_pkg_res {
 };
 
 struct ipa_esipa_get_eim_pkg_res *ipa_esipa_get_eim_pkg(struct ipa_context *ctx, const uint8_t *eid);
+
+/*! Record why the eUICC state changed, to be reported on the next ESipa.GetEimPackage
+ *  (SGP.32, sections 5.14.5 and 6.3.2.6).
+ *  The most recent cause wins: notifyStateChange asks the eIM to re-read the eUICC wholesale, so the
+ *  cause describes the latest event rather than a log of everything since the last poll.
+ *  \param[inout] ctx pointer to ipa_context.
+ *  \param[in] cause what happened; IPA_STATE_CHANGE_NONE clears a pending report. */
+void ipa_esipa_note_state_change(struct ipa_context *ctx, enum ipa_state_change_cause cause);
+
+/*! Record the last registered PLMN, reported on every ESipa.GetEimPackage. See ipa_set_rplmn() in
+ *  onomondo/ipa/ipad.h. */
+int ipa_esipa_set_rplmn(struct ipa_context *ctx, const char *mcc, const char *mnc);
 void ipa_esipa_get_eim_pkg_free(struct ipa_esipa_get_eim_pkg_res *res);
+
+/*! Name of an ESipa.GetEimPackage error code, for log messages.  Shared by the ASN.1 and
+ *  JSON bindings so that one code is never described by two different names. */
+const char *ipa_esipa_get_eim_pkg_err_str(long err);

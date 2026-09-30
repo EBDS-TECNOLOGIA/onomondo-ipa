@@ -37,22 +37,19 @@
  *   and fallbackSupported.  Downstream consumers do not need to access these
  *   but should tolerate their presence (asn1c handles EXTENSIBILITY IMPLIED).
  *
- * TODO v1.1: rewrite this function to:
- *   1. [DONE] Use ipa_euicc_data_request->euiccCiPKIdentifierToBeUsed (the new
- *      OCTET STRING) where it previously read ->euiccCiPKId.  The old field
- *      is SubjectKeyIdentifier (OCTET STRING alias) so the value is
- *      compatible at the C level, only the name changes.
- *   2. [DONE] Split the searchCriteria branch: notifications tag 0xBF2B uses
- *      searchCriteriaNotification; euiccPackageResult seq lookups use
+ * The v1.1 rewrite is done.  Four changes were needed, and the sites that carry them are
+ * marked "v1.1 change N" below:
+ *   1. Read euiccCiPKIdentifierToBeUsed (OCTET STRING) where the code previously read
+ *      euiccCiPKId.  The old field is a SubjectKeyIdentifier, itself an OCTET STRING alias,
+ *      so only the name changed at the C level.
+ *   2. Split the searchCriteria branch: notifications (tag 0xBF2B) use
+ *      searchCriteriaNotification, eUICC package result lookups use the separate
  *      searchCriteriaEuiccPackageResult.
- *   3. [DONE] Build the response using the new IpaEuiccData layout; populate
- *      eimTransactionId when the eIM supplied one.
- *   4. [DONE] On error, emit IpaEuiccDataResponseError rather than the old
- *      inline INTEGER.
+ *   3. Build the response in the new IpaEuiccData layout and echo eimTransactionId when
+ *      the eIM supplied one.
+ *   4. On error emit IpaEuiccDataResponseError rather than the old inline INTEGER.
  * =====================================================================
  */
-
-// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 #include <stdio.h>
 #include <assert.h>
@@ -65,12 +62,14 @@
 #include <IpaCapabilities.h>
 #include <BIT_STRING.h>
 #include <DeviceInfo.h>
+#include "device_info.h"
 #include <DeviceCapabilities.h>
 #include <IpaEuiccDataResponse.h>
 #include "context.h"
 #include "utils.h"
 #include "es10a_get_euicc_cfg_addr.h"
 #include "es10b_get_euicc_info.h"
+#include "es10c_get_prfle_info.h"
 #include "es10b_get_eim_cfg_data.h"
 #include "es10b_get_certs.h"
 #include "es10b_retr_notif_from_lst.h"
@@ -108,8 +107,10 @@ struct IpaCapabilities *make_ipa_capabilties(void)
 	/* We do generate ctxParams1, see also proc_cmn_mtl_auth.c */
 	bit_string_set_named_bit(ipa_ipaFeatures_buf, IpaCapabilities__ipaFeatures_eimCtxParams1Generation);
 
-	/* We do not yet support the ProfileMetadata verification (see TODO in proc_indirect_prfle_dwnld.c),
-	 * nor minimizeEsipaBytes (compact ESipa messages); both bits stay cleared. */
+	/* eimProfileMetadataVerification set would mean "the IPA cannot verify the Profile Metadata, the eIM has to
+	 * do it". We do verify it (the Profile Policy Rules against the RAT of the eUICC, see ppr.c and
+	 * proc_indirect_prfle_dwnld.c), so the bit stays cleared and the eIM sends the metadata along.
+	 * minimizeEsipaBytes (compact ESipa messages) is not supported and stays cleared as well. */
 
 	ipa_capabilties.ipaSupportedProtocols = &ipa_supported_protocols;
 
@@ -123,19 +124,50 @@ struct IpaCapabilities *make_ipa_capabilties(void)
 	return &ipa_capabilties;
 }
 
-/* See also SGP.22, section 4.2 */
+/* See also SGP.22, section 4.2. The same structure is built for ctxParams1 during the Common Mutual
+ * Authentication procedure, so both go through device_info.c. */
 static struct DeviceInfo *make_device_info(struct ipa_context *ctx)
 {
-	static struct DeviceInfo device_info = { 0 };
+	static struct DeviceInfo device_info;
+	static struct ipa_device_info_store device_info_store;
 
-	IPA_ASSIGN_BUF_TO_ASN(device_info.tac, ctx->cfg->tac, IPA_LEN_TAC);
-	/* TODO: Optionally it would also be possible to submint the IMEI here, The question is: Do we need that? */
-
-	/* TODO: The struct "device_info.deviceCapabilities" contains only optional parameters that refer supported
-	 * features of the supported RAN. We should find a suitable way to present those fields to the user so that
-	 * he can set the parameter via the ipa_context. For now we leave those parameters unpopulated. */
+	ipa_device_info_fill(&device_info, &device_info_store, ctx->cfg);
 
 	return &device_info;
+}
+
+/* Build an IpaEuiccDataResponseError, echoing eimTransactionId from the request when the eIM supplied
+ * one: SGP.32 section 2.11.2.2 requires it back "in the IpaEuiccData or IpaEuiccDataResponseError", and
+ * asn1c omits the OPTIONAL field when the pointer is NULL. */
+static void set_data_error(struct IpaEuiccDataResponse *res, const struct IpaEuiccDataRequest *req,
+			   IpaEuiccDataErrorCode_t err_code)
+{
+	res->choice.ipaEuiccDataResponseError.eimTransactionId = req->eimTransactionId;
+	res->choice.ipaEuiccDataResponseError.ipaEuiccDataErrorCode = err_code;
+	res->present = IpaEuiccDataResponse_PR_ipaEuiccDataResponseError;
+}
+
+/* SGP.32, section 2.11.2.2: "If the Emergency Profile is enabled, then the IPA SHALL stop the procedure
+ * and return an IpaEuiccDataResponseError containing ipaEuiccDataErrorCode set to ecallActive."
+ *
+ * The enabled state changes at runtime, so unlike the rest of ipa_euicc_caps it cannot be cached and has
+ * to be read from the eUICC. The capability flag can be, though, and an eUICC that does not implement
+ * the Emergency Profile mechanism at all cannot have one enabled -- so the ES10c round trip is skipped
+ * in that case, which is every consumer eUICC under the IoT emulation. */
+static bool ecall_profile_enabled(struct ipa_context *ctx)
+{
+	struct ipa_es10c_get_prfle_info_res *prfle_info_res;
+	struct ipa_euicc_caps caps = { 0 };
+	bool enabled;
+
+	if (ipa_es10b_get_euicc_caps(ctx, &caps) == 0 && !caps.ecall_supported)
+		return false;
+
+	prfle_info_res = ipa_es10c_get_prfle_info(ctx, NULL);
+	enabled = ipa_es10c_ecall_prfle_enabled(prfle_info_res);
+	ipa_es10c_get_prfle_info_res_free(prfle_info_res);
+
+	return enabled;
 }
 
 /*! Perform IpaEuiccDataRequest Procedure.
@@ -153,13 +185,23 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 	struct ipa_es10b_get_certs_res *get_certs_res = NULL;
 	struct ipa_es10b_retr_notif_from_lst_req retr_notif_from_lst_req = { 0 };
 	struct ipa_es10b_retr_notif_from_lst_res *retr_notif_from_lst_res = NULL;
-	/* FIX TODO 2: separate result holder for the euicc package result list lookup. */
+	/* v1.1 change 2: separate result holder for the euicc package result list lookup. */
 	struct ipa_es10b_retr_notif_from_lst_res *retr_epr_from_lst_res = NULL;
 	struct ipa_esipa_prvde_eim_pkg_rslt_req prvde_eim_pkg_rslt_req = { 0 };
 	struct ipa_esipa_prvde_eim_pkg_rslt_res *prvde_eim_pkg_rslt_res = NULL;
 
 	/* Final response */
 	struct IpaEuiccDataResponse ipa_euicc_data_response = { 0 };
+
+	/* SGP.32 section 2.11.2.2 has this refusal come before anything else: the procedure stops, so no
+	 * eUICC data is gathered and none is returned. */
+	if (ecall_profile_enabled(ctx)) {
+		IPA_LOGP(SIPA, LINFO,
+			 "Emergency Profile is enabled, refusing the eUICC data request with ecallActive\n");
+		set_data_error(&ipa_euicc_data_response, pars->ipa_euicc_data_request,
+			       IpaEuiccDataErrorCode_ecallActive);
+		goto send_response;
+	}
 
 	/* Collect requested data */
 	tag_list = IPA_BUF_FROM_ASN(&pars->ipa_euicc_data_request->tagList);
@@ -180,7 +222,7 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 	if (ipa_tag_in_taglist(0xBF22, tag_list)) {
 		IPA_LOGP(SIPA, LINFO, "eIM asks for eUICCInfo2\n");
 		euicc_info_2 = ipa_es10b_get_euicc_info(ctx, true);
-		if (euicc_info_2 &&!euicc_info_2->sgp32_euicc_info_2)
+		if (euicc_info_2 && euicc_info_2->sgp32_euicc_info_2)
 			ipa_euicc_data_response.choice.ipaEuiccData.euiccInfo2 = euicc_info_2->sgp32_euicc_info_2;
 	}
 
@@ -199,7 +241,7 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 	if (ipa_tag_in_taglist(0x84, tag_list)) {
 		struct EimConfigurationData *eim_cfg_data_item;
 		IPA_LOGP(SIPA, LINFO, "eIM asks for Association token\n");
-		eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx);
+		eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx, ctx->eim_id);
 		if (eim_cfg_data && eim_cfg_data->res) {
 			eim_cfg_data_item = ipa_es10b_get_eim_cfg_data_filter(eim_cfg_data, ctx->eim_id);
 			if (eim_cfg_data_item)
@@ -209,12 +251,12 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 
 	if (ipa_tag_in_taglist(0xA5, tag_list)) {
 		IPA_LOGP(SIPA, LINFO, "eIM asks for EUM certificate\n");
-		/* FIX TODO 1 (SGP.32 §2.11.1.2): source field renamed from euiccCiPKId to
+		/* v1.1 change 1 (SGP.32 §2.11.1.2): source field renamed from euiccCiPKId to
 		 * euiccCiPKIdentifierToBeUsed (OCTET STRING; was SubjectKeyIdentifier).
 		 * Destination GetCertsRequest.euiccCiPKId (SGP.22) is unchanged. */
 		get_certs_req.req.euiccCiPKId = pars->ipa_euicc_data_request->euiccCiPKIdentifierToBeUsed;
 		get_certs_res = ipa_es10b_get_certs(ctx, &get_certs_req);
-		/* FIX TODO 4: on failure emit IpaEuiccDataResponseError (SGP.32 §2.11.2.2). */
+		/* v1.1 change 4: on failure emit IpaEuiccDataResponseError (SGP.32 §2.11.2.2). */
 		if (!get_certs_res || !get_certs_res->eum_certificate || !get_certs_res->euicc_certificate)
 			goto send_cert_error;
 		ipa_euicc_data_response.choice.ipaEuiccData.eumCertificate = get_certs_res->eum_certificate;
@@ -227,10 +269,10 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 			ipa_euicc_data_response.choice.ipaEuiccData.euiccCertificate = get_certs_res->euicc_certificate;
 		} else {
 			IPA_LOGP(SIPA, LINFO, "eIM asks for eUICC certificate\n");
-			/* FIX TODO 1 (SGP.32 §2.11.1.2): see rename note in 0xA5 block above. */
+			/* v1.1 change 1 (SGP.32 §2.11.1.2): see rename note in 0xA5 block above. */
 			get_certs_req.req.euiccCiPKId = pars->ipa_euicc_data_request->euiccCiPKIdentifierToBeUsed;
 			get_certs_res = ipa_es10b_get_certs(ctx, &get_certs_req);
-			/* FIX TODO 4: on failure emit IpaEuiccDataResponseError (SGP.32 §2.11.2.2). */
+			/* v1.1 change 4: on failure emit IpaEuiccDataResponseError (SGP.32 §2.11.2.2). */
 			if (!get_certs_res || !get_certs_res->eum_certificate || !get_certs_res->euicc_certificate)
 				goto send_cert_error;
 			ipa_euicc_data_response.choice.ipaEuiccData.euiccCertificate = get_certs_res->euicc_certificate;
@@ -254,7 +296,7 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 	if (ipa_tag_in_taglist(0xBF2B, tag_list)) {
 		IPA_LOGP(SIPA, LINFO, "eIM asks for List of Notifications and/or eUICC Package Results\n");
 
-		/* FIX TODO 2 (SGP.32 §2.11.1.2): notifications use searchCriteriaNotification. */
+		/* v1.1 change 2 (SGP.32 §2.11.1.2): notifications use searchCriteriaNotification. */
 		retr_notif_from_lst_req.dr_search_criteria =
 		    pars->ipa_euicc_data_request->searchCriteriaNotification;
 		retr_notif_from_lst_res = ipa_es10b_retr_notif_from_lst(ctx, &retr_notif_from_lst_req);
@@ -267,7 +309,7 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 			    &retr_notif_from_lst_res->sgp32_res->choice.notificationList;
 		}
 
-		/* FIX TODO 2 (SGP.32 §2.11.1.2): eUICC package results use the SEPARATE
+		/* v1.1 change 2 (SGP.32 §2.11.1.2): eUICC package results use the SEPARATE
 		 * searchCriteriaEuiccPackageResult field; result goes into euiccPackageResultList. */
 		if (pars->ipa_euicc_data_request->searchCriteriaEuiccPackageResult) {
 			struct ipa_es10b_retr_notif_from_lst_req epr_req = { 0 };
@@ -296,7 +338,7 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 		}
 	}
 
-	/* FIX TODO 3 (SGP.32 §2.11.2.2): echo eimTransactionId from the request into
+	/* v1.1 change 3 (SGP.32 §2.11.2.2): echo eimTransactionId from the request into
 	 * IpaEuiccData field [7].  The eIM uses this to correlate the response with its
 	 * original request and to verify signature coverage of the transaction.
 	 * Both sides are TransactionId_t * (OCTET STRING alias); NULL pointer is fine —
@@ -306,7 +348,7 @@ int ipa_proc_euicc_data_req(struct ipa_context *ctx, const struct ipa_proc_euicc
 	ipa_euicc_data_response.present = IpaEuiccDataResponse_PR_ipaEuiccData;
 	goto send_response;
 
-	/* FIX TODO 4 (SGP.32 §2.11.2.2): certificate retrieval failed — build an
+	/* v1.1 change 4 (SGP.32 §2.11.2.2): certificate retrieval failed — build an
 	 * IpaEuiccDataResponseError and fall through to send_response.
 	 * GetCertsResponse__getCertsError_invalidCiPKId maps to
 	 * IpaEuiccDataErrorCode_euiccCiPKIdNotFound(5); everything else maps to
@@ -322,10 +364,7 @@ send_cert_error: {
 		IPA_LOGP(SIPA, LINFO,
 			 "GetCerts failed (eIM error code %ld), sending IpaEuiccDataResponseError\n",
 			 (long)err_code);
-		ipa_euicc_data_response.choice.ipaEuiccDataResponseError.eimTransactionId =
-		    pars->ipa_euicc_data_request->eimTransactionId;
-		ipa_euicc_data_response.choice.ipaEuiccDataResponseError.ipaEuiccDataErrorCode = err_code;
-		ipa_euicc_data_response.present = IpaEuiccDataResponse_PR_ipaEuiccDataResponseError;
+		set_data_error(&ipa_euicc_data_response, pars->ipa_euicc_data_request, err_code);
 	}
 	/* fall through to send_response */
 
@@ -333,6 +372,12 @@ send_response:
 	prvde_eim_pkg_rslt_req.ipa_euicc_data_resp = &ipa_euicc_data_response;
 	prvde_eim_pkg_rslt_res = ipa_esipa_prvde_eim_pkg_rslt(ctx, &prvde_eim_pkg_rslt_req);
 	if (!prvde_eim_pkg_rslt_res)
+		goto error;
+
+	/* The eIM may have taken the response and then refused it because it could not tell which eUICC sent
+	 * it (SGP.32, section 6.3.2.7). The data did not reach the eIM in any usable sense, so this is a
+	 * failure of the procedure, not a success with a warning. */
+	if (prvde_eim_pkg_rslt_res->prvde_eim_pkg_rslt_err)
 		goto error;
 
 	if (ipa_euicc_data_response.present == IpaEuiccDataResponse_PR_ipaEuiccDataResponseError)

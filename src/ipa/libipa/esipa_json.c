@@ -19,7 +19,7 @@
  *   - matchingId, smdpAddress: plain JSON strings.
  *   - eimPackageError, stateChangeCause: plain JSON integers.
  *
- * Compile-time switch: IPA_HAVE_JANSSON (set from CMake when jansson is
+ * Compile-time switch: IPA_HAVE_ESIPA_JSON (set from CMake when jansson is
  * detected).  When absent, every entrypoint returns NULL / -1 so the
  * ASN.1 binding continues to work unchanged.
  */
@@ -36,6 +36,7 @@
 #include <onomondo/ipa/log.h>
 #include "length.h"
 #include "utils.h"
+#include "esipa.h"
 #include "esipa_json.h"
 #include "esipa_init_auth.h"
 #include "esipa_auth_clnt.h"
@@ -46,10 +47,11 @@
 #include "esipa_cancel_session.h"
 #include "context.h"
 
-#ifdef IPA_HAVE_JANSSON
+#ifdef IPA_HAVE_ESIPA_JSON
 
 #include <jansson.h>
 #include <AuthenticateServerResponse.h>
+#include <SGP32-AuthenticateServerResponse.h>
 #include <EsipaMessageFromEimToIpa.h>
 #include <EsipaMessageFromIpaToEim.h>
 #include <EuiccPackageRequest.h>
@@ -307,9 +309,160 @@ const char *ipa_esipa_json_url_path(const char *function_name)
 
 bool ipa_esipa_json_available(void) { return true; }
 
+/* Is a member present as a JSON string?  Used to check the member a response body cannot be without
+ * before an "Ok" structure is built for it -- the sections 6.4.1.x schemas name these in their
+ * "required" lists.  Only the one member that identifies the response is checked, not the whole list:
+ * the point is to tell a result apart from no result, and an eIM that omits one of the others is
+ * answering imprecisely rather than not answering.  Attaching an empty "Ok" to a body with no result
+ * at all would present it to the caller as a success.
+ *
+ * This backstops the response header, which is where a failure is normally reported: a body arriving
+ * without a result and without a header saying why is still not a success.
+ *
+ * The check has to happen before the structure is populated rather than after: some members are
+ * filled in with pointers that must not be freed (see matchingId below), so a half-built "Ok" cannot
+ * simply be thrown away again. */
+static bool json_has_str(json_t *obj, const char *member)
+{
+	json_t *j = json_object_get(obj, member);
+
+	return j && json_is_string(j);
+}
+
+/* One row of a function's "Specific Status Codes" table (SGP.32, sections 5.14.1 to 5.14.6).  A table
+ * is terminated by an entry with a NULL subject_code. */
+struct esipa_json_status_map {
+	const char *subject_code;
+	const char *reason_code;
+	long err;
+};
+
+/* Read the <JSON responseHeader> and turn a reported failure into the error code the caller expects.
+ *
+ * SGP.32 section 6.1.2 binds the ESipa JSON response to SGP.22 section 6.5.1.4: the response message is
+ * a <JSON responseHeader> followed by the <JSON responseBody>, and the header carries
+ * header.functionExecutionStatus with status "Executed-Success" or "Failed" (SGP.22 section 5.2.5 rules
+ * the other two values out).  This -- not the HTTP status -- is where a failed ESipa function is
+ * reported: SGP.22 section 6.3 requires status code 200 "regardless whether the function response is an
+ * error or a success", so a 4xx or 5xx means the request never reached function execution at all, which
+ * is why ipa_esipa_req() rejects those separately and earlier.
+ *
+ * A failure identifies itself with a (subjectCode, reasonCode) pair rather than with the integer the
+ * ASN.1 binding carries.  Each function's "Specific Status Codes" table maps the pairs onto exactly
+ * those integers -- the "(maps to ...)" note in each table's Description column -- which is what lets
+ * one caller handle both bindings without knowing which one is in use.
+ *
+ * DONE for v1.2: CR12011R00 / sections 5.2.6, 5.14, 6.1 — the JSON to ASN.1 status code mapping.  Each
+ * function's table lives next to its decoder below.
+ *
+ * Note the asymmetry with the request direction: section 6.1.2 says ESipa messages SHALL NOT contain
+ * the <JSON requestHeader>, and says no such thing about the response header.
+ *
+ * \returns 0 when the function succeeded, otherwise the mapped error code (undefined_err for a failure
+ * the function's table does not list, and for a malformed header, because something went wrong and
+ * saying which is beyond what was received). */
+static long json_exec_status(json_t *obj, const struct esipa_json_status_map *map, long undefined_err,
+			     const char *function_name)
+{
+	json_t *hdr, *fes, *status, *scd, *subject, *reason, *message;
+	const char *status_str, *subject_str, *reason_str;
+	unsigned int i;
+
+	/* header, header.functionExecutionStatus and its status are each "required" in SGP.22 section
+	 * 6.5.1.4, and section 6.1.2 puts that header on every ESipa response.  A response missing any of
+	 * them is not the message this interface defines, and cannot be read as a success just because it
+	 * failed to say otherwise.  json_is_object() and json_is_string() are NULL-safe, so the whole
+	 * chain collapses into one check. */
+	hdr = json_object_get(obj, "header");
+	fes = json_object_get(hdr, "functionExecutionStatus");
+	status = json_object_get(fes, "status");
+	if (!json_is_string(status)) {
+		IPA_LOGP_ESIPA(function_name, LERROR,
+			       "response carries no header.functionExecutionStatus.status, so there is no saying whether the function succeeded\n");
+		return undefined_err;
+	}
+
+	status_str = json_string_value(status);
+	if (strcmp(status_str, "Executed-Success") == 0)
+		return 0;
+	if (strcmp(status_str, "Failed") != 0) {
+		/* SGP.22 section 5.2.5 forbids Executed-WithWarning and Expired here, leaving "Failed" as the
+		 * only other value.  Anything else is a response this interface does not define; report the
+		 * value received so a non-conforming eIM can be identified from the log. */
+		IPA_LOGP_ESIPA(function_name, LERROR,
+			       "response reports function execution status \"%s\", which this interface does not define\n",
+			       status_str);
+		return undefined_err;
+	}
+
+	/* statusCodeData is optional -- section 6.5.1.4 requires only status -- so a bare "Failed" is a
+	 * conforming answer that does not say why.  Where it is present, subjectCode and reasonCode are
+	 * both required, and one without the other says no more than neither. */
+	scd = json_object_get(fes, "statusCodeData");
+	subject = json_object_get(scd, "subjectCode");
+	reason = json_object_get(scd, "reasonCode");
+	if (!json_is_string(subject) || !json_is_string(reason)) {
+		IPA_LOGP_ESIPA(function_name, LERROR,
+			       "function failed, without a status code saying why\n");
+		return undefined_err;
+	}
+	subject_str = json_string_value(subject);
+	reason_str = json_string_value(reason);
+
+	/* message is optional and purely human-readable, which makes it worth logging and nothing else. */
+	message = json_object_get(scd, "message");
+
+	for (i = 0; map && map[i].subject_code; i++) {
+		if (strcmp(map[i].subject_code, subject_str) != 0 || strcmp(map[i].reason_code, reason_str) != 0)
+			continue;
+		if (json_is_string(message))
+			IPA_LOGP_ESIPA(function_name, LDEBUG, "eIM says: %s\n", json_string_value(message));
+		return map[i].err;
+	}
+
+	/* A status code outside this function's table.  The generic codes of SGP.22 section 5.2.6 can turn
+	 * up on any function, and the ASN.1 error enums have no room for them, so they collapse onto
+	 * undefinedError -- which still fails the call, only less precisely. */
+	IPA_LOGP_ESIPA(function_name, LERROR,
+		       "function failed with status code %s/%s, which it does not define%s%s\n",
+		       subject_str, reason_str, json_is_string(message) ? ": " : "",
+		       json_is_string(message) ? json_string_value(message) : "");
+	return undefined_err;
+}
+
+/* Did the eIM report a failure, for a function with no response body of its own?
+ *
+ * ESipa.CancelSession is the only one: section 6.4.1.8 ends with "ESipa.CancelSession function has no
+ * <JSON responseBody>", which leaves the response header of section 6.1.2 as the entire response, and
+ * therefore as the only place a failure can be stated.  Section 5.14.8 defines no Specific Status Codes
+ * for it, so there is nothing to map -- the question is only whether it failed.
+ *
+ * \returns true when the eIM reported success. */
+bool ipa_esipa_json_exec_ok(const struct ipa_buf *body, const char *function_name)
+{
+	json_t *obj = json_load_from_buf(body);
+	long err;
+
+	if (!obj) {
+		IPA_LOGP_ESIPA(function_name, LERROR,
+			       "response is not the JSON responseHeader this function is supposed to carry\n");
+		return false;
+	}
+	err = json_exec_status(obj, NULL, -1, function_name);
+	json_decref(obj);
+	return err == 0;
+}
+
 /* ---------------------------------------------------------------------- */
 /* §6.4.1.1  InitiateAuthentication                                        */
 /* ---------------------------------------------------------------------- */
+
+/* DONE for v1.2: CR12013R00 / §6.4.1.1 — JSON binding alignment.  Request carries euiccChallenge,
+ * euiccInfo1, smdpAddress and eimTransactionId; response carries transactionId, serverSigned1,
+ * serverSignature1, euiccCiPKIdentifierToBeUsed, serverCertificate, matchingId and ctxParams1 —
+ * member for member what the v1.2 schema lists, with transactionId and eimTransactionId as hex
+ * (pattern "^[0-9,A-F]{2,32}$") and the rest as base64 of DER.  euiccChallenge is the exception the
+ * schema calls out: base64 of the OCTET STRING value, without its tag and length. */
 
 struct ipa_buf *ipa_esipa_json_enc_init_auth_req(const struct ipa_esipa_init_auth_req *req)
 {
@@ -325,7 +478,14 @@ struct ipa_buf *ipa_esipa_json_enc_init_auth_req(const struct ipa_esipa_init_aut
 	/* smdpAddress: plain string (optional) */
 	if (req->smdp_addr)
 		json_object_set_new(obj, "smdpAddress", json_string(req->smdp_addr));
-	/* eimTransactionId (v1.1 new) - not yet plumbed from caller side; skip. */
+	/* eimTransactionId: hex, present only when the eIM supplied one in the
+	 * ProfileDownloadTriggerRequest that started this download. */
+	if (req->eim_transaction_id) {
+		char *eim_tid_hex = hex_encode(req->eim_transaction_id->buf, req->eim_transaction_id->size);
+		if (!eim_tid_hex) goto err;
+		json_object_set_new(obj, "eimTransactionId", json_string(eim_tid_hex));
+		IPA_FREE(eim_tid_hex);
+	}
 
 	struct ipa_buf *buf = json_dump_to_buf(obj);
 	json_decref(obj);
@@ -335,6 +495,14 @@ err:
 	return NULL;
 }
 
+/* SGP.32, section 5.14.1, Table 9a. */
+static const struct esipa_json_status_map init_auth_status_map[] = {
+	{ "8.31.2", "3.10", InitiateAuthenticationResponseEsipa__initiateAuthenticationErrorEsipa_invalidEimTransactionId },
+	{ "8.8.1", "3.10", InitiateAuthenticationResponseEsipa__initiateAuthenticationErrorEsipa_smdpAddressMismatch },
+	{ "8.8", "3.10", InitiateAuthenticationResponseEsipa__initiateAuthenticationErrorEsipa_smdpOidMismatch },
+	{ NULL, NULL, 0 }
+};
+
 struct ipa_esipa_init_auth_res *ipa_esipa_json_dec_init_auth_res(const struct ipa_buf *body)
 {
 	json_t *obj = json_load_from_buf(body);
@@ -342,8 +510,29 @@ struct ipa_esipa_init_auth_res *ipa_esipa_json_dec_init_auth_res(const struct ip
 	struct ipa_esipa_init_auth_res *res = IPA_ALLOC_ZERO(struct ipa_esipa_init_auth_res);
 	if (!res) { json_decref(obj); return NULL; }
 
+	/* A failure reported in the response header.  No Ok structure is attached, so the caller's "no Ok
+	 * member" guard trips even if it never inspects the code. */
+	res->init_auth_err = json_exec_status(obj, init_auth_status_map,
+					      InitiateAuthenticationResponseEsipa__initiateAuthenticationErrorEsipa_undefinedError,
+					      "InitiateAuthentication");
+	if (res->init_auth_err) {
+		IPA_LOGP_ESIPA("InitiateAuthentication", LERROR, "function failed with error code %ld=%s!\n",
+			       res->init_auth_err, ipa_esipa_init_auth_err_str(res->init_auth_err));
+		json_decref(obj);
+		return res;
+	}
+
 	/* The JSON body is *not* wrapped in EsipaMessageFromEimToIpa, so we
 	 * synthesise the inner InitiateAuthenticationOkEsipa manually. */
+	/* The header reported no failure, yet the body carries no result either: nothing here is usable,
+	 * and attaching an empty "Ok" would hand the caller a success it never received. */
+	if (!json_has_str(obj, "serverSigned1")) {
+		IPA_LOGP_ESIPA("InitiateAuthentication", LERROR,
+			       "response reported success but carries no serverSigned1, treating it as a failure\n");
+		json_decref(obj);
+		return res;
+	}
+
 	struct InitiateAuthenticationOkEsipa *ok = IPA_ALLOC_ZERO(struct InitiateAuthenticationOkEsipa);
 	if (!ok) { IPA_FREE(res); json_decref(obj); return NULL; }
 
@@ -395,12 +584,16 @@ struct ipa_esipa_init_auth_res *ipa_esipa_json_dec_init_auth_res(const struct ip
 	/* matchingId: plain string (optional) */
 	j = json_object_get(obj, "matchingId");
 	if (j && json_is_string(j)) {
-		static UTF8String_t mid;
+		/* Heap, not a function-static.  A static would be shared by every response decoded in this
+		 * process -- each call overwriting the previous result's matchingId and orphaning its buffer
+		 * -- and, worse, would make the enclosing "Ok" unfreeable, because ASN_STRUCT_FREE would
+		 * reach a free() of an object that was never allocated. */
+		UTF8String_t *mid = IPA_ALLOC_ZERO(UTF8String_t);
 		size_t l = strlen(json_string_value(j));
-		mid.buf = IPA_ALLOC_N(l);
-		memcpy(mid.buf, json_string_value(j), l);
-		mid.size = l;
-		ok->matchingId = &mid;
+		mid->buf = IPA_ALLOC_N(l);
+		memcpy(mid->buf, json_string_value(j), l);
+		mid->size = l;
+		ok->matchingId = mid;
 	}
 	/* ctxParams1: base64(DER) (optional) */
 	CtxParams1_t *cp1 = json_get_asn1_b64(obj, "ctxParams1", &asn_DEF_CtxParams1);
@@ -436,8 +629,10 @@ struct ipa_buf *ipa_esipa_json_enc_auth_clnt_req(const struct ipa_esipa_auth_cln
 			return NULL;
 		}
 	} else {
+		/* The field is an SGP32-AuthenticateServerResponse, so it needs the SGP.32 descriptor.  The
+		 * SGP.22 one has only two CHOICE members and cannot encode the compact branch at all. */
 		if (json_set_asn1_b64(obj, "authenticateServerResponse",
-				      &asn_DEF_AuthenticateServerResponse,
+				      &asn_DEF_SGP32_AuthenticateServerResponse,
 				      &req->req.authenticateServerResponse) < 0) {
 			json_decref(obj);
 			return NULL;
@@ -448,6 +643,12 @@ struct ipa_buf *ipa_esipa_json_enc_auth_clnt_req(const struct ipa_esipa_auth_cln
 	return buf;
 }
 
+/* SGP.32, section 5.14.3, Table 13a. */
+static const struct esipa_json_status_map auth_clnt_status_map[] = {
+	{ "8.2.8", "1.2", AuthenticateClientResponseEsipa__authenticateClientErrorEsipa_pprNotAllowed },
+	{ NULL, NULL, 0 }
+};
+
 struct ipa_esipa_auth_clnt_res *ipa_esipa_json_dec_auth_clnt_res(const struct ipa_buf *body,
 								 const struct ipa_esipa_auth_clnt_req *req)
 {
@@ -457,10 +658,31 @@ struct ipa_esipa_auth_clnt_res *ipa_esipa_json_dec_auth_clnt_res(const struct ip
 	struct ipa_esipa_auth_clnt_res *res = IPA_ALLOC_ZERO(struct ipa_esipa_auth_clnt_res);
 	if (!res) { json_decref(obj); return NULL; }
 
+	/* A failure reported in the response header.  No Ok structure is attached, so the caller's "no Ok
+	 * member" guard trips even if it never inspects the code. */
+	res->auth_clnt_err = json_exec_status(obj, auth_clnt_status_map,
+					      AuthenticateClientResponseEsipa__authenticateClientErrorEsipa_undefinedError,
+					      "AuthenticateClient");
+	if (res->auth_clnt_err) {
+		IPA_LOGP_ESIPA("AuthenticateClient", LERROR, "function failed with error code %ld=%s!\n",
+			       res->auth_clnt_err, ipa_esipa_auth_clnt_err_str(res->auth_clnt_err));
+		json_decref(obj);
+		return res;
+	}
+
 	/* §6.4.1.2 response body is NOT a CHOICE in JSON — it's an object with
 	 * the DP-case fields.  The DS-case (smds) path is transported via
 	 * profileDownloadTriggerResult in GetEimPackage/TransferEimPackage in
 	 * the JSON binding, so we always decode as DP here. */
+	/* The header reported no failure, yet the body carries no result either: nothing here is usable,
+	 * and attaching an empty "Ok" would hand the caller a success it never received. */
+	if (!json_has_str(obj, "smdpSigned2")) {
+		IPA_LOGP_ESIPA("AuthenticateClient", LERROR,
+			       "response reported success but carries no smdpSigned2, treating it as a failure\n");
+		json_decref(obj);
+		return res;
+	}
+
 	struct AuthenticateClientOkDPEsipa *ok =
 	    IPA_ALLOC_ZERO(struct AuthenticateClientOkDPEsipa);
 	if (!ok) { IPA_FREE(res); json_decref(obj); return NULL; }
@@ -480,6 +702,7 @@ struct ipa_esipa_auth_clnt_res *ipa_esipa_json_dec_auth_clnt_res(const struct ip
 	StoreMetadataRequest_t *smr = json_get_asn1_b64(obj, "profileMetadata", &asn_DEF_StoreMetadataRequest);
 	if (smr) ok->profileMetaData = smr;
 	SmdpSigned2_t *s2 = json_get_asn1_b64(obj, "smdpSigned2", &asn_DEF_SmdpSigned2);
+	bool have_smdp_signed2 = s2 != NULL;
 	if (s2) { ok->smdpSigned2 = *s2; IPA_FREE(s2); }
 	j = json_object_get(obj, "smdpSignature2");
 	if (j && json_is_string(j)) {
@@ -497,7 +720,13 @@ struct ipa_esipa_auth_clnt_res *ipa_esipa_json_dec_auth_clnt_res(const struct ip
 	if (hc) ok->hashCc = hc;
 
 	res->auth_clnt_ok_dpe = ok;
-	if (ok->transactionId) res->transaction_id = ok->transactionId;
+	/* Same rule as the ASN.1 binding: SGP.32 section 5.14.3 makes transactionId optional because
+	 * smdpSigned2 carries it too, and the eIM omits it towards an IPA with IPA Capability
+	 * minimizeEsipaBytes.  Fall back to the signed copy rather than leaving the session without one. */
+	if (ok->transactionId)
+		res->transaction_id = ok->transactionId;
+	else if (have_smdp_signed2)
+		res->transaction_id = &ok->smdpSigned2.transactionId;
 	json_decref(obj);
 	return res;
 }
@@ -506,18 +735,31 @@ struct ipa_esipa_auth_clnt_res *ipa_esipa_json_dec_auth_clnt_res(const struct ip
 /* §6.4.1.3  GetBoundProfilePackage                                        */
 /* ---------------------------------------------------------------------- */
 
+/* DONE for v1.2: CR12013R00 / §6.4.1.3 — JSON binding alignment.  Request carries transactionId and
+ * prepareDownloadResponse, both required by the schema and both refused if absent; response carries
+ * transactionId and boundProfilePackage. */
+
 struct ipa_buf *ipa_esipa_json_enc_get_bnd_prfle_pkg_req(const struct ipa_esipa_get_bnd_prfle_pkg_req *req)
 {
 	json_t *obj = json_object();
 	if (!obj) return NULL;
-	/* transactionId: the caller's GetBoundProfilePackageRequestEsipa (ASN.1)
-	 * carries transactionId as a sibling field.  Here we only have the
-	 * SGP32-PrepareDownloadResponse pointer; if the caller needs the
-	 * transactionId populated, the ASN.1 binding is the path to use.
-	 * TODO: plumb transactionId through ipa_esipa_get_bnd_prfle_pkg_req. */
 	const struct PrepareDownloadResponse *pdr = req->prep_dwnld_res;
-	if (pdr && json_set_asn1_b64(obj, "prepareDownloadResponse",
-				     &asn_DEF_PrepareDownloadResponse, pdr) < 0) {
+	/* transactionId: hex, and required by the schema of section 6.4.1.3. It is not a member of the request
+	 * struct; it sits inside the PrepareDownloadResponse, which is where the ASN.1 binding takes it from
+	 * too (see ipa_esipa_get_bnd_prfle_pkg_transaction_id). */
+	const TransactionId_t *tid = ipa_esipa_get_bnd_prfle_pkg_transaction_id(pdr);
+	if (!tid) {
+		IPA_LOGP_ESIPA("GetBoundProfilePackage", LERROR,
+			       "prepare download response carries no transaction id, cannot encode request\n");
+		json_decref(obj);
+		return NULL;
+	}
+	char *tid_hex = hex_encode(tid->buf, tid->size);
+	if (!tid_hex) { json_decref(obj); return NULL; }
+	json_object_set_new(obj, "transactionId", json_string(tid_hex));
+	IPA_FREE(tid_hex);
+	if (json_set_asn1_b64(obj, "prepareDownloadResponse",
+			      &asn_DEF_PrepareDownloadResponse, pdr) < 0) {
 		json_decref(obj);
 		return NULL;
 	}
@@ -526,12 +768,39 @@ struct ipa_buf *ipa_esipa_json_enc_get_bnd_prfle_pkg_req(const struct ipa_esipa_
 	return buf;
 }
 
+/* SGP.32, section 5.14.2, Table 11a. */
+static const struct esipa_json_status_map get_bnd_prfle_pkg_status_map[] = {
+	{ "8.2.9", "3.11", GetBoundProfilePackageResponseEsipa__getBoundProfilePackageErrorEsipa_metadataMismatch },
+	{ NULL, NULL, 0 }
+};
+
 struct ipa_esipa_get_bnd_prfle_pkg_res *ipa_esipa_json_dec_get_bnd_prfle_pkg_res(const struct ipa_buf *body)
 {
 	json_t *obj = json_load_from_buf(body);
 	if (!obj) return NULL;
 	struct ipa_esipa_get_bnd_prfle_pkg_res *res = IPA_ALLOC_ZERO(struct ipa_esipa_get_bnd_prfle_pkg_res);
 	if (!res) { json_decref(obj); return NULL; }
+	/* A failure reported in the response header.  No Ok structure is attached, so the caller's "no Ok
+	 * member" guard trips even if it never inspects the code. */
+	res->get_bnd_prfle_pkg_err = json_exec_status(obj, get_bnd_prfle_pkg_status_map,
+						      GetBoundProfilePackageResponseEsipa__getBoundProfilePackageErrorEsipa_undefinedError,
+						      "GetBoundProfilePackage");
+	if (res->get_bnd_prfle_pkg_err) {
+		IPA_LOGP_ESIPA("GetBoundProfilePackage", LERROR, "function failed with error code %ld=%s!\n",
+			       res->get_bnd_prfle_pkg_err, ipa_esipa_get_bnd_prfle_pkg_err_str(res->get_bnd_prfle_pkg_err));
+		json_decref(obj);
+		return res;
+	}
+
+	/* The header reported no failure, yet the body carries no result either: nothing here is usable,
+	 * and attaching an empty "Ok" would hand the caller a success it never received. */
+	if (!json_has_str(obj, "boundProfilePackage")) {
+		IPA_LOGP_ESIPA("GetBoundProfilePackage", LERROR,
+			       "response reported success but carries no boundProfilePackage, treating it as a failure\n");
+		json_decref(obj);
+		return res;
+	}
+
 	struct GetBoundProfilePackageOkEsipa *ok = IPA_ALLOC_ZERO(struct GetBoundProfilePackageOkEsipa);
 	if (!ok) { IPA_FREE(res); json_decref(obj); return NULL; }
 
@@ -560,7 +829,7 @@ struct ipa_esipa_get_bnd_prfle_pkg_res *ipa_esipa_json_dec_get_bnd_prfle_pkg_res
 /* ---------------------------------------------------------------------- */
 
 struct ipa_buf *ipa_esipa_json_enc_get_eim_pkg_req(const uint8_t *eid, bool notify_state_change,
-						   int state_change_cause)
+						   int state_change_cause, const uint8_t *rplmn)
 {
 	json_t *obj = json_object();
 	if (!obj) return NULL;
@@ -577,10 +846,29 @@ struct ipa_buf *ipa_esipa_json_enc_get_eim_pkg_req(const uint8_t *eid, bool noti
 		json_object_set_new(obj, "notifyStateChange", json_true());
 	if (state_change_cause >= 0)
 		json_object_set_new(obj, "stateChangeCause", json_integer(state_change_cause));
+	/* Section 6.4.1.5 spells this one "rPlmn", not "rPLMN" as the ASN.1 does, and carries the three
+	 * TS 24.008 bytes as plain base64 rather than the base64+DER most other fields here use. */
+	if (rplmn) {
+		char *rplmn_b64 = b64_encode(rplmn, IPA_LEN_PLMN);
+
+		if (rplmn_b64) {
+			json_object_set_new(obj, "rPlmn", json_string(rplmn_b64));
+			IPA_FREE(rplmn_b64);
+		}
+	}
 	struct ipa_buf *buf = json_dump_to_buf(obj);
 	json_decref(obj);
 	return buf;
 }
+
+/* SGP.32, section 5.14.5, Table 18. */
+static const struct esipa_json_status_map get_eim_pkg_status_map[] = {
+	{ "8.1.1", "3.7", GetEimPackageResponse__eimPackageError_noEimPackageAvailable },
+	{ "8.1.1", "2.1", GetEimPackageResponse__eimPackageError_invalidEid },
+	{ "8.1.1", "2.2", GetEimPackageResponse__eimPackageError_missingEid },
+	{ "8.1.1", "3.9", GetEimPackageResponse__eimPackageError_eidNotFound },
+	{ NULL, NULL, 0 }
+};
 
 struct ipa_esipa_get_eim_pkg_res *ipa_esipa_json_dec_get_eim_pkg_res(const struct ipa_buf *body)
 {
@@ -588,6 +876,21 @@ struct ipa_esipa_get_eim_pkg_res *ipa_esipa_json_dec_get_eim_pkg_res(const struc
 	if (!obj) return NULL;
 	struct ipa_esipa_get_eim_pkg_res *res = IPA_ALLOC_ZERO(struct ipa_esipa_get_eim_pkg_res);
 	if (!res) { json_decref(obj); return NULL; }
+
+	/* This is the one ESipa function whose JSON response body has an error branch of its own: section
+	 * 6.4.1.5 makes eimPackageError one arm of the body's "oneOf", alongside the three request types.
+	 * The response header of section 6.1.2 applies here as well, and Table 18 maps its status codes to
+	 * the very same four values, so the two cannot contradict each other -- but only the header is
+	 * available when the eIM reports the failure the general way. Consult it first, and fall back to
+	 * the body arm. */
+	res->eim_pkg_err = json_exec_status(obj, get_eim_pkg_status_map,
+					    GetEimPackageResponse__eimPackageError_undefinedError, "GetEimPackage");
+	if (res->eim_pkg_err) {
+		IPA_LOGP_ESIPA("GetEimPackage", LERROR, "function failed with error code %ld=%s!\n",
+			       res->eim_pkg_err, ipa_esipa_get_eim_pkg_err_str(res->eim_pkg_err));
+		json_decref(obj);
+		return res;
+	}
 
 	/* oneOf: euiccPackageRequest | ipaEuiccDataRequest |
 	 * profileDownloadTriggerRequest | eimPackageError */
@@ -603,6 +906,8 @@ struct ipa_esipa_get_eim_pkg_res *ipa_esipa_json_dec_get_eim_pkg_res(const struc
 							       &asn_DEF_ProfileDownloadTriggerRequest);
 	} else if ((j = json_object_get(obj, "eimPackageError")) && json_is_integer(j)) {
 		res->eim_pkg_err = (long)json_integer_value(j);
+		IPA_LOGP_ESIPA("GetEimPackage", LERROR, "function failed with error code %ld=%s!\n",
+			       res->eim_pkg_err, ipa_esipa_get_eim_pkg_err_str(res->eim_pkg_err));
 	}
 	json_decref(obj);
 	return res;
@@ -658,6 +963,11 @@ struct ipa_buf *ipa_esipa_json_enc_prvde_eim_pkg_rslt_req(const struct ipa_conte
 		if (req->eim_pkg_err != 0) {
 			epr->present = EimPackageResult_PR_eimPackageResultResponseError;
 			epr->choice.eimPackageResultResponseError.eimPackageResultErrorCode = req->eim_pkg_err;
+			/* Section 6.3.2.7 requires the eimTransactionId of the eIM Package to be echoed;
+			 * the JSON binding carries the very same EimPackageResult DER (section 6.4.1.6),
+			 * so the rule applies here unchanged. */
+			epr->choice.eimPackageResultResponseError.eimTransactionId =
+			    (TransactionId_t *) req->eim_transaction_id;
 		} else if (req->euicc_package_result && req->sgp32_notification_list) {
 			epr->present = EimPackageResult_PR_ePRAndNotifications;
 			epr->choice.ePRAndNotifications.euiccPackageResult = *req->euicc_package_result;
@@ -678,6 +988,8 @@ struct ipa_buf *ipa_esipa_json_enc_prvde_eim_pkg_rslt_req(const struct ipa_conte
 			epr->present = EimPackageResult_PR_eimPackageResultResponseError;
 			epr->choice.eimPackageResultResponseError.eimPackageResultErrorCode =
 			    EimPackageResultErrorCode_undefinedError;
+			epr->choice.eimPackageResultResponseError.eimTransactionId =
+			    (TransactionId_t *) req->eim_transaction_id;
 		}
 		if (json_set_asn1_b64(obj, "eimPackageResult",
 				      &asn_DEF_EimPackageResult, epr) < 0) {
@@ -691,6 +1003,14 @@ struct ipa_buf *ipa_esipa_json_enc_prvde_eim_pkg_rslt_req(const struct ipa_conte
 	return buf;
 }
 
+/* SGP.32, section 5.14.6, Table 21. */
+static const struct esipa_json_status_map prvde_eim_pkg_rslt_status_map[] = {
+	{ "8.1.1", "2.1", ProvideEimPackageResultResponse__provideEimPackageResultError_invalidEid },
+	{ "8.1.1", "2.2", ProvideEimPackageResultResponse__provideEimPackageResultError_missingEid },
+	{ "8.1.1", "3.9", ProvideEimPackageResultResponse__provideEimPackageResultError_eidNotFound },
+	{ NULL, NULL, 0 }
+};
+
 struct ipa_esipa_prvde_eim_pkg_rslt_res *ipa_esipa_json_dec_prvde_eim_pkg_rslt_res(const struct ipa_buf *body)
 {
 	struct ipa_esipa_prvde_eim_pkg_rslt_res *res = IPA_ALLOC_ZERO(struct ipa_esipa_prvde_eim_pkg_rslt_res);
@@ -698,6 +1018,22 @@ struct ipa_esipa_prvde_eim_pkg_rslt_res *ipa_esipa_json_dec_prvde_eim_pkg_rslt_r
 	if (!body || body->len == 0) return res;
 	json_t *obj = json_load_from_buf(body);
 	if (!obj) return res;
+
+	/* The eIM refusing the eIM Package Result matters to the caller: on a refusal the result was never
+	 * processed, so it must be kept rather than retired.  An acceptance with nothing to acknowledge
+	 * leaves eimAcknowledgements NULL too, which is why the two are told apart by this code and not by
+	 * the absence of the member. */
+	res->prvde_eim_pkg_rslt_err = json_exec_status(obj, prvde_eim_pkg_rslt_status_map,
+						       ProvideEimPackageResultResponse__provideEimPackageResultError_undefinedError,
+						       "ProvideEimPackageResult");
+	if (res->prvde_eim_pkg_rslt_err) {
+		IPA_LOGP_ESIPA("ProvideEimPackageResult", LERROR, "function failed with error code %ld=%s!\n",
+			       res->prvde_eim_pkg_rslt_err,
+			       ipa_esipa_prvde_eim_pkg_rslt_err_str(res->prvde_eim_pkg_rslt_err));
+		json_decref(obj);
+		return res;
+	}
+
 	/* eimAcknowledgements optional — base64(DER) */
 	EimAcknowledgements_t *acks = json_get_asn1_b64(obj, "eimAcknowledgements", &asn_DEF_EimAcknowledgements);
 	if (acks) res->eim_acknowledgements = acks;
@@ -841,7 +1177,7 @@ err:
 	return NULL;
 }
 
-#else  /* !IPA_HAVE_JANSSON --------------------------------------------- */
+#else  /* !IPA_HAVE_ESIPA_JSON --------------------------------------------- */
 
 #include <errno.h>
 
@@ -856,7 +1192,8 @@ bool ipa_esipa_json_available(void) { return false; }
 struct ipa_buf *ipa_esipa_json_enc_init_auth_req(const struct ipa_esipa_init_auth_req *req) { (void)req; return NULL; }
 struct ipa_buf *ipa_esipa_json_enc_auth_clnt_req(const struct ipa_esipa_auth_clnt_req *req) { (void)req; return NULL; }
 struct ipa_buf *ipa_esipa_json_enc_get_bnd_prfle_pkg_req(const struct ipa_esipa_get_bnd_prfle_pkg_req *req) { (void)req; return NULL; }
-struct ipa_buf *ipa_esipa_json_enc_get_eim_pkg_req(const uint8_t *eid, bool n, int s) { (void)eid; (void)n; (void)s; return NULL; }
+struct ipa_buf *ipa_esipa_json_enc_get_eim_pkg_req(const uint8_t *eid, bool n, int s, const uint8_t *r)
+{ (void)eid; (void)n; (void)s; (void)r; return NULL; }
 struct ipa_buf *ipa_esipa_json_enc_prvde_eim_pkg_rslt_req(const struct ipa_context *ctx,
 							  const struct ipa_esipa_prvde_eim_pkg_rslt_req *req) { (void)ctx; (void)req; return NULL; }
 struct ipa_buf *ipa_esipa_json_enc_handle_notif_req(const struct ipa_esipa_handle_notif_req *req) { (void)req; return NULL; }
@@ -870,7 +1207,7 @@ struct ipa_esipa_get_bnd_prfle_pkg_res *ipa_esipa_json_dec_get_bnd_prfle_pkg_res
 struct ipa_esipa_get_eim_pkg_res *ipa_esipa_json_dec_get_eim_pkg_res(const struct ipa_buf *body) { (void)body; return NULL; }
 struct ipa_esipa_prvde_eim_pkg_rslt_res *ipa_esipa_json_dec_prvde_eim_pkg_rslt_res(const struct ipa_buf *body) { (void)body; return NULL; }
 
-#endif /* IPA_HAVE_JANSSON */
+#endif /* IPA_HAVE_ESIPA_JSON */
 
 /* ---------------------------------------------------------------------- */
 /* Content-Type helper (available regardless of jansson presence)          */

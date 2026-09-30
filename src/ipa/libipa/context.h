@@ -10,7 +10,23 @@
 #include <onomondo/ipa/ipad.h>
 #include <onomondo/ipa/utils.h>
 
-#define IPA_NVSTATE_VERSION 3
+#define IPA_NVSTATE_VERSION 7
+
+/*! Whether the IoT eUICC emulation may run, see ipa_config.iot_euicc_emu_enabled.
+ *
+ *  Reads the runtime flag in a build that has the emulation (-DIOT_EUICC_EMULATION=ON), and folds to a compile-time
+ *  0 in one that does not.  The dispatch sites are written the same way either way; what changes is that in a build
+ *  without the emulation every branch behind this is unreachable, so the optimiser drops the calls and the linker
+ *  then drops the emulation functions themselves (see the dead code elimination set up in the top-level
+ *  CMakeLists.txt).  Doing it this way keeps eleven dispatch sites free of preprocessor conditionals.
+ *
+ *  ipa_init() refuses a configuration that asks for the emulation in a build that cannot provide it, so this never
+ *  silently ignores the flag. */
+#ifdef IPA_HAVE_IOT_EUICC_EMULATION
+#define IPA_EUICC_EMU(ctx) ((ctx)->cfg->iot_euicc_emu_enabled)
+#else
+#define IPA_EUICC_EMU(ctx) 0
+#endif
 
 /* Non volatile state: All struct members in this struct are automatically backed up to a non volatile memory location.
  * (see below). However, this only covers statically allocated struct members. When struct members contain a pointer
@@ -22,23 +38,63 @@ struct ipa_nvstate {
 	 *  a different version of onomondo-ipa */
 	uint32_t version;
 
+	/*! Why the eUICC state last changed, reported on the next ESipa.GetEimPackage (SGP.32 sections
+	 * 5.14.5 and 6.3.2.6). Holds an enum ipa_state_change_cause; IPA_STATE_CHANGE_NONE means there
+	 * is nothing to report. Persisted because a reset is itself a cause, so the value has to outlive
+	 * the reset that produced it. */
+	int8_t state_change_cause;
+
 	/*! internal storage for IoT eUICC emulation. */
 	struct {
 		int association_token_counter;
 		struct ipa_buf *eim_cfg_ber;
 
 		/*! Immediate Profile Enabling configuration (set via configureImmediateEnable PSMO).
-		 * UPDATE for v1.1: 2.11.1.1.3 — renamed from configureAutoEnable.
-		 * TODO v1.1: rename struct member auto_enable -> immediate_enable once
-		 * all call sites are updated (grep repo for 'auto_enable'). */
+		 * UPDATE for v1.1: 2.11.1.1.3 — renamed from configureAutoEnable. */
 		struct {
 			bool flag;           /* UPDATE for v1.1: 2.11.1.1.3 — corresponds to immediateEnableFlag */
 			struct ipa_buf *smdp_oid;     /* UPDATE for v1.1: 2.11.1.1.3 — corresponds to defaultSmdpOid */
 			struct ipa_buf *smdp_address; /* UPDATE for v1.1: 2.11.1.1.3 — corresponds to defaultSmdpAddress */
-		} auto_enable;
+		} immediate_enable;
+
+		/*! ICCID of the Profile carrying the Fallback Attribute, all-zero when there is none.
+		 * SGP.32 section 4.4 keeps this flag in the Profile Metadata (ProfileInfo.fallbackAttribute,
+		 * tag '9F26'), which a consumer eUICC has no room for, so the emulation holds it here.
+		 * Fixed size on purpose: it rides along in the wholesale serialization of this struct and
+		 * needs no entry in nvstate_serialize()/_deserialize()/_free_contents(). */
+		uint8_t fallback_iccid[IPA_LEN_ICCID];
+
+		/*! Sequence number for the next emulated eUICC Package Result.
+		 * SGP.32 section 5.14.6 has the eIM "Check if the sequence number of the EuiccPackageResult
+		 * is greater than the expected sequence number of the eUICC.  If not, the eIM SHALL discard
+		 * the input", and then update its expectation to what it received -- so a constant would have
+		 * every result after the first discarded.  A real IoT eUICC allocates these from the same
+		 * counter it uses for Notifications; a consumer eUICC has no concept of an eUICC Package
+		 * Result at all, so the emulation keeps its own counter here.
+		 *
+		 * Persisted because SGP.22 section 3.5 says of that counter that "Neither an eUICC Memory
+		 * Reset nor a reset of the eUICC SHALL affect this Sequence Number": restarting the IPA must
+		 * not walk it backwards, or the eIM starts discarding again.
+		 *
+		 * This number is a fiction shared only with the eIM.  It must never be sent to the card in an
+		 * ES10b.RemoveNotificationFromList, where it would name an unrelated real Notification -- see
+		 * ipa_proc_eucc_pkg_dwnld_exec_onset(). */
+		uint32_t epr_seq_number;
+
+		/*! ICCID of the Profile that ExecuteFallbackMechanism disabled to make room for the
+		 * Fallback Profile, all-zero when the fallback is not in effect. SGP.32 section 5.9.21 has
+		 * ReturnFromFallback re-enable "the Profile that was previously enabled", which a real IoT
+		 * eUICC remembers internally; under emulation this is where that memory lives. */
+		uint8_t pre_fallback_iccid[IPA_LEN_ICCID];
 	} iot_euicc_emu;
 
 } __attribute__((packed));
+
+/*! Is any Profile flagged as the Fallback Profile? The emulation keeps that flag in nvstate rather than
+ *  in the Profile Metadata (SGP.32 section 4.4), so "none" is an all-zero ICCID. */
+#define IPA_EMU_FALLBACK_SET(ctx) \
+	(memcmp((ctx)->nvstate.iot_euicc_emu.fallback_iccid, (const uint8_t[IPA_LEN_ICCID]){ 0 }, \
+		IPA_LEN_ICCID) != 0)
 
 /*! Context for one IPAd instance. */
 struct ipa_context {
@@ -54,6 +110,14 @@ struct ipa_context {
 	/*! cached eID (read from eUICC when ipa_init is called) */
 	uint8_t eid[IPA_LEN_EID];
 
+	/*! Last PLMN the device registered to, as coded in 3GPP TS 24.008, reported on every
+	 * ESipa.GetEimPackage so the eIM can spot roaming (SGP.32, section 5.14.5). Supplied by the host
+	 * through ipa_set_rplmn(), because the modem owns it and the IPA cannot see it. Deliberately not
+	 * in nvstate: where the device was registered before a restart says nothing about where it is
+	 * now, and a stale PLMN is worse than none. */
+	uint8_t rplmn[IPA_LEN_PLMN];
+	bool rplmn_valid;
+
 	/*! volatile internal storage for IoT eUICC emulation. */
 	struct {
 		/*! cached ICCID of the currently active profile. This ICCID value will be used when a profile rollback is
@@ -63,14 +127,12 @@ struct ipa_context {
 
 		/*! cached data to support the emulation of the ES10b function ImmediateEnable.
 		 * UPDATE for v1.1: 5.9.15 — ES10b function renamed EnableUsingDD -> ImmediateEnable
-		 * (now implemented in es10b_immediate_enable.{c,h}).
-		 * TODO v1.1: rename struct member auto_enable -> immediate_enable
-		 * (grep repo for 'auto_enable'). */
+		 * (now implemented in es10b_immediate_enable.{c,h}). */
 		struct {
 			struct ipa_buf *smdp_oid;
 			struct ipa_buf *smdp_address;
 			struct ipa_buf *profile_aid;
-		} auto_enable;
+		} immediate_enable;
 	} iot_euicc_emu;
 
 	/*! cached eimId (read from eUICC when ipa_init is called) */
@@ -82,6 +144,35 @@ struct ipa_context {
 	/*! cached state of generic eUICC package download and execute procedure
 	 *  (used from proc_euicc_pkg_dwnld_exec.c, proc_eim_pkg_retr.c and ipad.c) */
 	struct ipa_proc_eucc_pkg_dwnld_exec_res *proc_eucc_pkg_dwnld_exec_res;
+
+	/*! cached EUICCInfo2 capabilities (SGP.32, section 5.9.2), filled by the first
+	 *  ipa_get_euicc_caps() call. The eUICC cannot change what it reports here while it is powered,
+	 *  so one ES10b round trip is enough for the life of the context. */
+	struct {
+		bool valid;
+		bool ecall_supported;
+		bool fallback_supported;
+		struct ipa_version *iot_version;
+		size_t iot_version_count;
+	} euicc_caps;
+
+	/*! Which IPA is active right now, see SGP.32, section 3.8.4. Unlike euicc_caps this is not read
+	 *  from the eUICC: it is tracked as the link is brought up, because the answer depends on what
+	 *  this IPA itself has told the eUICC. Declaring IPAd support in TERMINAL CAPABILITY is what
+	 *  makes the eUICC leave IPAe deactivated, so the mode only settles once that has been sent. */
+	enum ipa_mode ipa_mode;
+
+	/*! ISDRProprietaryApplicationTemplateIoT from the ISD-R SELECT FCI (SGP.32, section 3.8.4).
+	 *  valid stays false when the eUICC did not return the template -- an SGP.22 card, or one that
+	 *  answered the SELECT without an FCI. ipae_supported is a static property of the eUICC and does
+	 *  not change with ipa_mode: it says an IPAe exists, not that it is running.
+	 *  The template's other bit, enabledProfile, is deliberately not kept here. It is true only at
+	 *  the instant of the SELECT and any later enable/disable makes it a lie; ES10c GetProfilesInfo
+	 *  is the source for that question. */
+	struct {
+		bool valid;
+		bool ipae_supported;
+	} isdr_fci;
 
 	/*! Non volatile storage: Everything stored in this struct is loaded by the API user from a non volatile memory
 	 *  location on startup (ipa_new_ctx) and stored to a non volatile location on exit (ipa_free_ctx). */

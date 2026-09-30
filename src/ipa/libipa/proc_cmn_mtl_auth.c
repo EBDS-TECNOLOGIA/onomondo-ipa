@@ -38,8 +38,10 @@
 #include <UTF8String.h>
 #include "context.h"
 #include "utils.h"
+#include "cert.h"
 #include "es10b_get_euicc_info.h"
 #include "es10b_get_euicc_chlg.h"
+#include "device_info.h"
 #include "es10b_auth_serv.h"
 #include "esipa_auth_clnt.h"
 #include "esipa_init_auth.h"
@@ -143,13 +145,14 @@ static int check_certificate(const struct ipa_buf *allowed_ca, const Certificate
 		}
 	}
 
-	/* TODO: Verify that the certificate is valid in respect to its time window. This is an optional step but it
-	 * may make sense to catch such problems early. */
-
-	return 0;
+	/* Verify that the certificate is valid in respect to its time window. The eUICC verifies the certificate
+	 * itself in the next step (ES10b.AuthenticateServer) but has no clock, so this is the one part of the
+	 * verification that only the IPA can do. */
+	return ipa_cert_check_validity(certificate, "SM-DP+ (CERT.XXauth.SIG)");
 }
 
-static void gen_ctx_params_1(struct CtxParams1 *ctx_params_1, const uint8_t *tac, const char *ac_token)
+static void gen_ctx_params_1(struct CtxParams1 *ctx_params_1, struct ipa_device_info_store *device_info_store,
+			     const struct ipa_config *cfg, const char *ac_token)
 {
 	assert(ctx_params_1);
 	memset(ctx_params_1, 0, sizeof(*ctx_params_1));
@@ -163,15 +166,11 @@ static void gen_ctx_params_1(struct CtxParams1 *ctx_params_1, const uint8_t *tac
 		ctx_params_1->choice.ctxParamsForCommonAuthentication.matchingId = &matchingId;
 	}
 
-	IPA_ASSIGN_BUF_TO_ASN(ctx_params_1->choice.ctxParamsForCommonAuthentication.deviceInfo.tac, (uint8_t *) tac,
-			      IPA_LEN_TAC);
-
-	/* TODO: the IMEI field is optional, do we need it?
-	 * ctx_params_1->choice.ctxParamsForCommonAuthentication.deviceInfo.imei = (8 byte octet string, optional); */
-
-	/* TODO: deviceCapabilities is a mandatory field, but the struct it represents contains only optional
-	 * fields. Does that mean that we have to populate at least one of those fields?
-	 * ctx_params_1->choice.ctxParamsForCommonAuthentication.deviceInfo.deviceCapabilities... = ?; */
+	/* TAC, IMEI and device capabilities all come from the IPAd configuration, since none of them is something
+	 * the IPA could discover on its own. The same structure goes out again in IpaEuiccDataResponse, so it is
+	 * built in one place (see device_info.c). */
+	ipa_device_info_fill(&ctx_params_1->choice.ctxParamsForCommonAuthentication.deviceInfo, device_info_store,
+			     cfg);
 }
 
 /*! Perform Common Mutual Authentication Procedure.
@@ -186,6 +185,7 @@ struct ipa_esipa_auth_clnt_res *ipa_proc_cmn_mtl_auth(struct ipa_context *ctx,
 	struct ipa_esipa_init_auth_req init_auth_req = { 0 };
 	struct ipa_esipa_init_auth_res *init_auth_res = NULL;;
 	struct ipa_es10b_auth_serv_req auth_serv_req = { 0 };
+	struct ipa_device_info_store device_info_store = { 0 };
 	struct ipa_es10b_auth_serv_res *auth_serv_res = NULL;
 	struct ipa_esipa_auth_clnt_req auth_clnt_req = { 0 };
 	struct ipa_esipa_auth_clnt_res *auth_clnt_res = NULL;
@@ -211,6 +211,7 @@ struct ipa_esipa_auth_clnt_res *ipa_proc_cmn_mtl_auth(struct ipa_context *ctx,
 	init_auth_req.euicc_challenge = euicc_challenge;
 	init_auth_req.smdp_addr = (char *)pars->smdp_addr;
 	init_auth_req.euicc_info_1 = euicc_info->euicc_info_1;
+	init_auth_req.eim_transaction_id = pars->eim_transaction_id;
 	init_auth_res = ipa_esipa_init_auth(ctx, &init_auth_req);
 	if (!init_auth_res)
 		goto error;
@@ -248,7 +249,7 @@ struct ipa_esipa_auth_clnt_res *ipa_proc_cmn_mtl_auth(struct ipa_context *ctx,
 	    ipa_strip_tlv_envelope(auth_serv_req.req.euiccCiPKIdToBeUsed.buf,
 				   auth_serv_req.req.euiccCiPKIdToBeUsed.size, 0x04);
 	auth_serv_req.req.serverCertificate = init_auth_res->init_auth_ok->serverCertificate;
-	gen_ctx_params_1(&auth_serv_req.req.ctxParams1, pars->tac, pars->ac_token);
+	gen_ctx_params_1(&auth_serv_req.req.ctxParams1, &device_info_store, ctx->cfg, pars->ac_token);
 	auth_serv_res = ipa_es10b_auth_serv(ctx, &auth_serv_req);
 	if (!auth_serv_res)
 		goto error;
@@ -273,10 +274,13 @@ struct ipa_esipa_auth_clnt_res *ipa_proc_cmn_mtl_auth(struct ipa_context *ctx,
 		    SGP32_AuthenticateServerResponse_PR_authenticateResponseOk;
 		auth_clnt_req.req.authenticateServerResponse.choice.authenticateResponseOk =
 		    *auth_serv_res->auth_serv_ok;
-		/* Pass raw BER bytes from the eUICC verbatim so that euiccSignature1
-		 * over euiccSigned1 is not broken by a BER→DER re-encoding round-trip.
-		 * NULL on the IoT-emulation path (auth_serv_res->raw_res is not set
-		 * there) — the struct-based encoding is used as fallback. */
+		/* Pass raw BER bytes from the eUICC verbatim so that euiccSignature1 over euiccSigned1 is not
+		 * broken by a BER→DER re-encoding round-trip. ipa_es10b_auth_serv() keeps these for every
+		 * successful transceive, emulation included, so this branch always forwards the original bytes
+		 * and the signed content never round-trips through the decoded struct. That also keeps
+		 * euiccSigned1.euiccInfo2 intact: the schema binds it to the SGP.22 EUICCInfo2, which silently
+		 * drops the SGP.32-only iotSpecificInfo when it is re-encoded (see the note on EuiccSigned1 in
+		 * SGP32Definitions.asn). */
 		auth_clnt_req.raw_authenticate_server_response = auth_serv_res->raw_res;
 	}
 	auth_clnt_res = ipa_esipa_auth_clnt(ctx, &auth_clnt_req);

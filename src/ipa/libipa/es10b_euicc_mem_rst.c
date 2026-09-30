@@ -20,14 +20,8 @@
  *   - resetResult adds new error ecallActive(104).
  *   - resetAutoEnableConfigResult renamed to resetImmediateEnableConfigResult;
  *     the tagging is dropped (field is now untagged, relying on order).
- * TODO v1.1: after libasn regeneration the following will change:
- *   - SGP32_EuiccMemoryResetRequest / Response -> use the plain types
- *     generated from the updated SGP.32 schema (still tagged [100]).
- *   - All bit-position macros below must be renamed to match the new enum
- *     symbol names.  Specifically resetAutoEnableConfig -> resetImmediateEnableConfig.
- *   - The auto_enable_cfg request-struct field in struct ipa_es10b_euicc_mem_rst
- *     should be renamed to immediate_enable_cfg (plus one more field for
- *     deletePreLoadedTestProfiles / deleteProvisioningProfiles).
+ * All of the above is done: libasn has been regenerated, the symbols below use the v1.2 names, and
+ * struct ipa_es10b_euicc_mem_rst carries all seven options.
  * =====================================================================
  */
 
@@ -61,6 +55,7 @@ static const struct num_str_map sgp32_error_code_strings_resetResult[] = {
 	{ SGP32_EuiccMemoryResetResponse__resetResult_ok, "ok" },
 	{ SGP32_EuiccMemoryResetResponse__resetResult_nothingToDelete, "nothingToDelete" },
 	{ SGP32_EuiccMemoryResetResponse__resetResult_catBusy, "catBusy" },
+	{ SGP32_EuiccMemoryResetResponse__resetResult_ecallActive, "ecallActive" },
 	{ SGP32_EuiccMemoryResetResponse__resetResult_undefinedError, "undefinedError" },
 	{ 0, NULL }
 };
@@ -73,64 +68,62 @@ static const struct num_str_map sgp32_error_code_strings_resetEimResult[] = {
 	{ 0, NULL }
 };
 
-static const struct num_str_map sgp32_error_code_strings_resetAutoEnableConfigResult[] = {
+static const struct num_str_map sgp32_error_code_strings_resetImmediateEnableConfigResult[] = {
 	{ SGP32_EuiccMemoryResetResponse__resetImmediateEnableConfigResult_ok, "ok" },
-	{ SGP32_EuiccMemoryResetResponse__resetImmediateEnableConfigResult_resetIECNotSupported, "nothingToDelete" },
-	{ SGP32_EuiccMemoryResetResponse__resetImmediateEnableConfigResult_undefinedError, "eimResetNotSupported" },
+	{ SGP32_EuiccMemoryResetResponse__resetImmediateEnableConfigResult_resetIECNotSupported,
+	  "resetIECNotSupported" },
+	{ SGP32_EuiccMemoryResetResponse__resetImmediateEnableConfigResult_undefinedError, "undefinedError" },
 	{ 0, NULL }
 };
+
+/* Log one result field of an eUICCMemoryReset response and map it to a return code.  Whether a given
+ * code counts as success differs per field, so the caller decides and passes the verdict in. */
+static int eval_rst_result(const char *field, long value, bool success, const struct num_str_map *strings)
+{
+	IPA_LOGP_ES10X("eUICCMemoryReset", success ? LINFO : LERROR, "%s: function %s with status code %ld=%s!\n",
+		       field, success ? "succeeded" : "failed", value, ipa_str_from_num(strings, value, "(unknown)"));
+	return success ? 0 : -EINVAL;
+}
 
 static int dec_euicc_mem_rst_res_sgp32(const struct ipa_buf *es10b_res)
 {
 	struct SGP32_EuiccMemoryResetResponse *asn = NULL;
-	int rc = 0;
+	int rc;
 
 	asn = ipa_es10x_res_dec(&asn_DEF_SGP32_EuiccMemoryResetResponse, es10b_res, "eUICCMemoryReset");
 	if (!asn)
 		return -EINVAL;
 
-	if (asn->resetResult != SGP32_EuiccMemoryResetResponse__resetResult_ok &&
-	    asn->resetResult != SGP32_EuiccMemoryResetResponse__resetResult_nothingToDelete) {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LERROR, "function failed with error code %ld=%s!\n",
-			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetResult,
-								  asn->resetResult, "(unknown)"));
-		rc = -EINVAL;
-	} else {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO, "function succeeded with status code %ld=%s!\n",
-			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetResult,
-								  asn->resetResult, "(unknown)"));
-	}
+	rc = eval_rst_result("resetResult", asn->resetResult,
+			     asn->resetResult == SGP32_EuiccMemoryResetResponse__resetResult_ok ||
+			     asn->resetResult == SGP32_EuiccMemoryResetResponse__resetResult_nothingToDelete,
+			     sgp32_error_code_strings_resetResult);
 
-	if (asn->resetResult != SGP32_EuiccMemoryResetResponse__resetEimResult_ok &&
-	    asn->resetResult != SGP32_EuiccMemoryResetResponse__resetEimResult_nothingToDelete) {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LERROR, "function failed with error code %ld=%s!\n",
-			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetEimResult,
-								  asn->resetResult, "(unknown)"));
+	/* SGP.32 5.9.5: the eUICC returns these two only when the matching reset option was requested,
+	 * so an absent field is not an error here. */
+	if (asn->resetEimResult &&
+	    eval_rst_result("resetEimResult", *asn->resetEimResult,
+			    *asn->resetEimResult == SGP32_EuiccMemoryResetResponse__resetEimResult_ok ||
+			    *asn->resetEimResult == SGP32_EuiccMemoryResetResponse__resetEimResult_nothingToDelete,
+			    sgp32_error_code_strings_resetEimResult) < 0)
 		rc = -EINVAL;
-	} else {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO, "function succeeded with status code %ld=%s!\n",
-			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetEimResult,
-								  asn->resetResult, "(unknown)"));
-	}
 
-	if (asn->resetResult != SGP32_EuiccMemoryResetResponse__resetImmediateEnableConfigResult_ok) {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LERROR, "function failed with error code %ld=%s!\n",
-			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetAutoEnableConfigResult,
-								  asn->resetResult, "(unknown)"));
+	if (asn->resetImmediateEnableConfigResult &&
+	    eval_rst_result("resetImmediateEnableConfigResult", *asn->resetImmediateEnableConfigResult,
+			    *asn->resetImmediateEnableConfigResult ==
+			    SGP32_EuiccMemoryResetResponse__resetImmediateEnableConfigResult_ok,
+			    sgp32_error_code_strings_resetImmediateEnableConfigResult) < 0)
 		rc = -EINVAL;
-	} else {
-		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO, "function succeeded with status code %ld=%s!\n",
-			       asn->resetResult, ipa_str_from_num(sgp32_error_code_strings_resetAutoEnableConfigResult,
-								  asn->resetResult, "(unknown)"));
-	}
 
-	ASN_STRUCT_FREE(asn_DEF_EuiccMemoryResetResponse, asn);
+	ASN_STRUCT_FREE(asn_DEF_SGP32_EuiccMemoryResetResponse, asn);
 	return rc;
 }
 
 static int dec_euicc_mem_rst_res(const struct ipa_buf *es10b_res)
 {
 	struct EuiccMemoryResetResponse *asn = NULL;
+	/* Initialised: the success branch below leaves rc alone, so an uninitialised one would be
+	 * returned as the result of a reset that worked. */
 	int rc = 0;
 
 	asn = ipa_es10x_res_dec(&asn_DEF_EuiccMemoryResetResponse, es10b_res, "eUICCMemoryReset");
@@ -163,9 +156,10 @@ int euicc_mem_rst(struct ipa_context *ctx, const struct ipa_es10b_euicc_mem_rst 
 
 	mem_rst_req.resetOptions.buf = rst_opt;
 	mem_rst_req.resetOptions.size = 1;
-	/* UPDATE for v1.1: 5.9.5 — resetOptions has 7 bits in v1.2 (was 5);
-	 * after regeneration, set bits_unused = 1 (one unused at LSB). */
-	mem_rst_req.resetOptions.bits_unused = 3;
+	/* SGP.32 5.9.5: resetOptions has 7 named bits (0..6) -> 1 byte, 1 unused bit at the LSB end.
+	 * The DER encoder masks the last octet with (0xff << bits_unused), so a value that is too large
+	 * silently drops the topmost named bits instead of reporting an error. */
+	mem_rst_req.resetOptions.bits_unused = 1;
 
 	if (req->operatnl_profiles)
 		rst_opt[0] |= (1 << (7 - SGP32_EuiccMemoryResetRequest__resetOptions_deleteOperationalProfiles));
@@ -173,21 +167,13 @@ int euicc_mem_rst(struct ipa_context *ctx, const struct ipa_es10b_euicc_mem_rst 
 		rst_opt[0] |= (1 << (7 - SGP32_EuiccMemoryResetRequest__resetOptions_deleteFieldLoadedTestProfiles));
 	if (req->default_smdp_addr)
 		rst_opt[0] |= (1 << (7 - SGP32_EuiccMemoryResetRequest__resetOptions_resetDefaultSmdpAddress));
-	/* TODO v1.1: 5.9.5 — add new options once struct ipa_es10b_euicc_mem_rst
-	 * is extended:
-	 *   if (req->pre_loaded_test_profiles)
-	 *       rst_opt[0] |= (1 << (7 - ..._deletePreLoadedTestProfiles));
-	 *   if (req->provisioning_profiles)
-	 *       rst_opt[0] |= (1 << (7 - ..._deleteProvisioningProfiles));
-	 */
+	if (req->pre_loaded_test_profiles)
+		rst_opt[0] |= (1 << (7 - SGP32_EuiccMemoryResetRequest__resetOptions_deletePreLoadedTestProfiles));
+	if (req->provisioning_profiles)
+		rst_opt[0] |= (1 << (7 - SGP32_EuiccMemoryResetRequest__resetOptions_deleteProvisioningProfiles));
 	if (req->eim_cfg_data)
-		/* UPDATE for v1.1: 5.9.5 — resetEimConfigData moved from bit (3) to bit (5). */
 		rst_opt[0] |= (1 << (7 - SGP32_EuiccMemoryResetRequest__resetOptions_resetEimConfigData));
-	/* UPDATE for v1.1: 5.9.5 — resetAutoEnableConfig (bit 4) renamed to
-	 * resetImmediateEnableConfig (bit 6); after regeneration, rename the
-	 * symbol below accordingly.  Also note bits 3 and 4 are now occupied by
-	 * deletePreLoadedTestProfiles / deleteProvisioningProfiles respectively. */
-	if (req->auto_enable_cfg)
+	if (req->immediate_enable_cfg)
 		rst_opt[0] |= (1 << (7 - SGP32_EuiccMemoryResetRequest__resetOptions_resetImmediateEnableConfig));
 
 	es10b_req = ipa_es10x_req_enc(&asn_DEF_SGP32_EuiccMemoryResetRequest, &mem_rst_req, "eUICCMemoryReset");
@@ -222,7 +208,8 @@ int euicc_mem_rst_emu(struct ipa_context *ctx, const struct ipa_es10b_euicc_mem_
 
 	mem_rst_req.resetOptions.buf = rst_opt;
 	mem_rst_req.resetOptions.size = 1;
-	mem_rst_req.resetOptions.bits_unused = 6;
+	/* SGP.22 5.7.19: resetOptions has 3 named bits (0..2) -> 1 byte, 5 unused bits at the LSB end. */
+	mem_rst_req.resetOptions.bits_unused = 5;
 
 	if (req->operatnl_profiles)
 		rst_opt[0] |= (1 << (7 - EuiccMemoryResetRequest__resetOptions_deleteOperationalProfiles));
@@ -231,20 +218,25 @@ int euicc_mem_rst_emu(struct ipa_context *ctx, const struct ipa_es10b_euicc_mem_
 	if (req->default_smdp_addr)
 		rst_opt[0] |= (1 << (7 - EuiccMemoryResetRequest__resetOptions_resetDefaultSmdpAddress));
 
+	if (req->pre_loaded_test_profiles || req->provisioning_profiles)
+		IPA_LOGP_ES10X("eUICCMemoryReset", LERROR,
+			       "IoT eUICC emulation active, but SGP.22 resetOptions cannot express "
+			       "deletePreLoadedTestProfiles / deleteProvisioningProfiles -- ignoring them!\n");
+
 	if (req->eim_cfg_data) {
 		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO,
 			       "IoT eUICC emulation active, also clearing memory with eIM configuration...\n");
 		IPA_FREE(ctx->nvstate.iot_euicc_emu.eim_cfg_ber);
 		ctx->nvstate.iot_euicc_emu.eim_cfg_ber = NULL;
 	}
-	if (req->auto_enable_cfg) {
+	if (req->immediate_enable_cfg) {
 		IPA_LOGP_ES10X("eUICCMemoryReset", LINFO,
-			       "IoT eUICC emulation active, also clearing auto enable configuration...\n");
-		IPA_FREE(ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid);
-		ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid = NULL;
-		IPA_FREE(ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address);
-		ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address = NULL;
-		ctx->nvstate.iot_euicc_emu.auto_enable.flag = false;
+			       "IoT eUICC emulation active, also clearing immediate enable configuration...\n");
+		IPA_FREE(ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid);
+		ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid = NULL;
+		IPA_FREE(ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address);
+		ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address = NULL;
+		ctx->nvstate.iot_euicc_emu.immediate_enable.flag = false;
 	}
 
 	es10b_req = ipa_es10x_req_enc(&asn_DEF_EuiccMemoryResetRequest, &mem_rst_req, "eUICCMemoryReset");
@@ -275,7 +267,7 @@ error:
  *  \returns 0 on success, negative on error. */
 int ipa_es10b_euicc_mem_rst(struct ipa_context *ctx, const struct ipa_es10b_euicc_mem_rst *req)
 {
-	if (ctx->cfg->iot_euicc_emu_enabled)
+	if (IPA_EUICC_EMU(ctx))
 		return euicc_mem_rst_emu(ctx, req);
 	else
 		return euicc_mem_rst(ctx, req);

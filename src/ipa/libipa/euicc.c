@@ -15,7 +15,10 @@
 #include <onomondo/ipa/scard.h>
 #include <onomondo/ipa/log.h>
 #include <onomondo/ipa/ipad.h>
+#include <ISDRProprietaryApplicationTemplateIoT.h>
 #include "context.h"
+#include "utils.h"
+#include "esipa_get_eim_pkg.h"
 #include "euicc.h"
 
 #define STORE_DATA_CLA 0x80
@@ -37,6 +40,18 @@
 
 #define MANAGE_CHANNEL_CLA 0x00
 #define MANAGE_CHANNEL_INS 0x70
+
+/* Proactive command type, ETSI TS 102 223 section 9.4 */
+#define PROACTIVE_CMD_REFRESH 0x01
+
+/* REFRESH command qualifiers, ETSI TS 102 223 section 6.6.7 */
+#define REFRESH_NAA_INIT_AND_FULL_FILE_CHANGE 0x00
+#define REFRESH_FILE_CHANGE 0x01
+#define REFRESH_NAA_INIT_AND_FILE_CHANGE 0x02
+#define REFRESH_NAA_INIT 0x03
+#define REFRESH_UICC_RESET 0x04
+#define REFRESH_NAA_APP_RESET 0x05
+#define REFRESH_NAA_SESSION_RESET 0x06
 
 #define MAX_BLOCKSIZE_TX 255
 #define MAX_BLOCKSIZE_RX 256
@@ -502,35 +517,87 @@ exit:
 	return rc;
 }
 
+/* Human readable name of a REFRESH command qualifier, for logging purposes. */
+static const char *refresh_qualifier_name(uint8_t qualifier)
+{
+	switch (qualifier) {
+	case REFRESH_NAA_INIT_AND_FULL_FILE_CHANGE:
+		return "NAA Initialization and Full File Change Notification";
+	case REFRESH_FILE_CHANGE:
+		return "File Change Notification";
+	case REFRESH_NAA_INIT_AND_FILE_CHANGE:
+		return "NAA Initialization and File Change Notification";
+	case REFRESH_NAA_INIT:
+		return "NAA Initialization";
+	case REFRESH_UICC_RESET:
+		return "UICC Reset";
+	case REFRESH_NAA_APP_RESET:
+		return "NAA Application Reset";
+	case REFRESH_NAA_SESSION_RESET:
+		return "NAA Session Reset";
+	default:
+		return "unknown";
+	}
+}
+
 /* Handle a pending proactive REFRESH signalled by SW=91xx: issue FETCH then
  * TERMINAL RESPONSE.  Errors are logged but do not fail the ES10x operation
  * because the eUICC has already committed the command (e.g. profile enable). */
 static void handle_proactive_refresh(struct ipa_context *ctx, uint8_t fetch_len)
 {
 	struct ipa_buf *proactive_cmd;
-	/* Fallback defaults: cmd_num=1, REFRESH(0x01), qualifier=0 */
-	uint8_t cmd_details[3] = { 0x01, 0x01, 0x00 };
+	/* Fallback defaults, used when the proactive command cannot be fetched or parsed:
+	 * cmd_num=1, REFRESH, NAA Initialization and Full File Change Notification. */
+	uint8_t cmd_details[3] = { 0x01, PROACTIVE_CMD_REFRESH, REFRESH_NAA_INIT_AND_FULL_FILE_CHANGE };
+	bool parsed = false;
 
 	IPA_LOGP(SEUICC, LINFO,
 		 "SW=91xx: proactive REFRESH pending (%u bytes), issuing FETCH + TERMINAL RESPONSE\n", fetch_len);
 
 	proactive_cmd = do_fetch(ctx, fetch_len);
 	if (proactive_cmd) {
-		parse_proactive_cmd_details(proactive_cmd, &cmd_details[0], &cmd_details[1], &cmd_details[2]);
+		parsed = parse_proactive_cmd_details(proactive_cmd, &cmd_details[0], &cmd_details[1],
+						     &cmd_details[2]);
+		if (!parsed)
+			IPA_LOGP(SEUICC, LERROR,
+				 "unable to parse the command details of the proactive command\n");
 		IPA_FREE(proactive_cmd);
 	}
 
 	send_terminal_response(ctx, cmd_details);
 
-	/* REFRESH qualifiers 0x01-0x04 (Init, Init+FileChange, Init+FullFileChange,
-	 * UICC Reset) all cause the card to close all logical channels.  Re-open the
-	 * ES10x channel and re-select ISD-R so subsequent STORE DATA commands work. */
-	if (cmd_details[2] >= 0x01 && cmd_details[2] <= 0x04) {
-		if (ipa_euicc_init_es10x(ctx) < 0)
-			IPA_LOGP(SEUICC, LERROR, "ES10x channel re-initialization after REFRESH failed\n");
-		else
-			IPA_LOGP(SEUICC, LINFO, "ES10x channel re-initialized after REFRESH\n");
+	/* The proactive command details could not be read, so the qualifier below is a guess
+	 * and must not be acted upon. */
+	if (!parsed)
+		return;
+
+	/* SW=91xx only tells us that a proactive command is pending, not which one. Anything
+	 * other than REFRESH does not concern the ES10x link. */
+	if (cmd_details[1] != PROACTIVE_CMD_REFRESH) {
+		IPA_LOGP(SEUICC, LINFO, "pending proactive command is not a REFRESH (type=%02x), ignoring\n",
+			 cmd_details[1]);
+		return;
 	}
+
+	IPA_LOGP(SEUICC, LINFO, "proactive REFRESH, qualifier %02x (%s)\n", cmd_details[2],
+		 refresh_qualifier_name(cmd_details[2]));
+
+	/* Of the qualifiers defined in ETSI TS 102 223 section 6.6.7 only "UICC Reset" asks the
+	 * terminal to reset the card. The others concern NAA initialization, NAA/session reset or
+	 * file change notifications and leave the ISD-R logical channel intact, so re-opening it
+	 * would be wrong: MANAGE CHANNEL addresses a fixed channel number here and some cards
+	 * reject opening a channel that was never closed.
+	 *
+	 * This path only covers eUICCs that ask for the reset. Those that silently require one
+	 * after a profile change are handled in ipa_poll(), which keys on the package contents
+	 * rather than on card behaviour. */
+	if (cmd_details[2] != REFRESH_UICC_RESET)
+		return;
+
+	if (ipa_euicc_reset_es10x(ctx) < 0)
+		IPA_LOGP(SEUICC, LERROR, "eUICC reset after REFRESH (UICC Reset) failed\n");
+	else
+		IPA_LOGP(SEUICC, LINFO, "eUICC reset and ES10x re-initialized after REFRESH (UICC Reset)\n");
 }
 
 static int euicc_transceive_es10x(struct ipa_context *ctx, struct ipa_buf **es10x_res, const struct ipa_buf *es10x_req)
@@ -642,8 +709,22 @@ static int euicc_transceive_es10x(struct ipa_context *ctx, struct ipa_buf **es10
  *  \returns IPA_BUF with ES10x response on success, NULL on failure. */
 struct ipa_buf *ipa_euicc_transceive_es10x(struct ipa_context *ctx, const struct ipa_buf *es10x_req)
 {
-	struct ipa_buf *es10x_res = ipa_buf_alloc(IPA_LEN_EUICC_BUF);
+	struct ipa_buf *es10x_res;
 	int rc;
+
+	/* SGP.32 3.8.4: once the eUICC's own IPAe is running we are not the IPA any more, and SGP.32
+	 * 3.8.2 has the eUICC enable the ES10 functions only for the IPA the device declared. Sending
+	 * anyway would at best be rejected by the card and at worst be acted on behind the IPAe's back,
+	 * so refuse here rather than at each of the several dozen call sites. Recovering is an eUICC
+	 * reset followed by a TERMINAL CAPABILITY that declares IPAd again, i.e. ipa_euicc_reset_es10x(),
+	 * which puts the mode back before anything reaches this function. */
+	if (ctx->ipa_mode == IPA_MODE_IPAE) {
+		IPA_LOGP(SEUICC, LERROR,
+			 "refusing to send ES10x: the eUICC runs its own IPAe, this IPAd is not the active IPA\n");
+		return NULL;
+	}
+
+	es10x_res = ipa_buf_alloc(IPA_LEN_EUICC_BUF);
 
 	IPA_LOGP(SEUICC, LDEBUG, "sending %zu bytes to eUICC (buffer size: %zu bytes)\n", es10x_req->len,
 		 es10x_req->data_len);
@@ -659,6 +740,151 @@ struct ipa_buf *ipa_euicc_transceive_es10x(struct ipa_context *ctx, const struct
 		 es10x_res->data_len);
 
 	return es10x_res;
+}
+
+/* Tags of the ISD-R SELECT response, see ISO/IEC 7816-4 and GlobalPlatform. */
+#define FCI_TEMPLATE_TAG 0x6F
+#define FCI_PROPRIETARY_TAG 0xA5
+/* SGP.32, section 3.8.4: ISDRProprietaryApplicationTemplateIoT ::= [PRIVATE 1] SEQUENCE, tag 'E1'. */
+#define FCI_ISDR_PROPRIETARY_IOT_TAG 0xE1
+
+/*! Track which IPA is active, see SGP.32, section 3.8.4 and euicc.h.  This is a property of the
+ *  conversation, not something the eUICC can be asked: it is our own TERMINAL CAPABILITY that settles
+ *  it, and an IpaeActivationRequest that hands it back. */
+void ipa_euicc_set_ipa_mode(struct ipa_context *ctx, enum ipa_mode mode)
+{
+	static const struct num_str_map mode_strings[] = {
+		{ IPA_MODE_IPAD, "IPAd" }, { IPA_MODE_IPAE, "IPAe" }, { 0, NULL }
+	};
+
+	if (ctx->ipa_mode == mode)
+		return;
+
+	ctx->ipa_mode = mode;
+	IPA_LOGP(SEUICC, LINFO, "active IPA is now %s\n", ipa_str_from_num(mode_strings, mode, "unknown"));
+}
+
+/* Find one TLV by tag among the TLVs packed into data[0..data_len).
+ * Returns a pointer to the whole TLV (tag included) and, through the out parameters, where its value
+ * starts and how long the whole thing is -- ber_decode() wants the former, a nested walk the latter. */
+static const uint8_t *find_tlv(uint16_t wanted, const uint8_t *data, size_t data_len, size_t *hdr_len,
+			       size_t *val_len)
+{
+	size_t offs = 0;
+
+	while (offs < data_len) {
+		uint16_t tag = 0;
+		size_t len = 0;
+		long hdr = ipa_parse_btlv_hdr_at(&len, &tag, data + offs, data_len - offs);
+
+		if (hdr < 0 || (size_t)hdr > data_len - offs || len > data_len - offs - (size_t)hdr)
+			return NULL;
+		if (tag == wanted) {
+			*hdr_len = (size_t)hdr;
+			*val_len = len;
+			return data + offs;
+		}
+		offs += (size_t)hdr + len;
+	}
+
+	return NULL;
+}
+
+/* Pull ISDRProprietaryApplicationTemplateIoT out of the SELECT response FCI.
+ *
+ * SGP.32 section 3.8.4 has the eUICC return it "within the FCI template after the objects defined in
+ * GlobalPlatform Card Specification", so it sits directly under '6F'.  Cards that group their
+ * proprietary objects under 'A5' are also accommodated, since that placement is common enough in the
+ * field that failing on it would cost us the template for no good reason. */
+static void parse_isdr_fci(struct ipa_context *ctx, const uint8_t *fci, size_t fci_len)
+{
+	ISDRProprietaryApplicationTemplateIoT_t *tmpl = NULL;
+	const uint8_t *body, *tlv;
+	size_t body_hdr, body_len, tlv_hdr, tlv_len;
+	asn_dec_rval_t rval;
+
+	body = find_tlv(FCI_TEMPLATE_TAG, fci, fci_len, &body_hdr, &body_len);
+	if (!body) {
+		IPA_LOGP(SEUICC, LDEBUG, "ISD-R SELECT response carries no FCI template\n");
+		return;
+	}
+	body += body_hdr;
+
+	tlv = find_tlv(FCI_ISDR_PROPRIETARY_IOT_TAG, body, body_len, &tlv_hdr, &tlv_len);
+	if (!tlv) {
+		const uint8_t *prop;
+		size_t prop_hdr, prop_len;
+
+		prop = find_tlv(FCI_PROPRIETARY_TAG, body, body_len, &prop_hdr, &prop_len);
+		if (prop)
+			tlv = find_tlv(FCI_ISDR_PROPRIETARY_IOT_TAG, prop + prop_hdr, prop_len, &tlv_hdr, &tlv_len);
+	}
+	if (!tlv) {
+		/* An SGP.22 eUICC carries the [PRIVATE 0] 'E0' template instead, and some cards return no
+		 * proprietary template at all.  Neither is our failure: section 3.8.4 puts the SHALL on
+		 * the eUICC, and nothing this IPA does depends on the answer. */
+		IPA_LOGP(SEUICC, LDEBUG, "ISD-R FCI carries no ISDRProprietaryApplicationTemplateIoT\n");
+		return;
+	}
+
+	rval = ber_decode(NULL, &asn_DEF_ISDRProprietaryApplicationTemplateIoT, (void **)&tmpl, tlv,
+			  tlv_hdr + tlv_len);
+	if (rval.code != RC_OK) {
+		IPA_LOGP(SEUICC, LERROR, "unable to decode ISDRProprietaryApplicationTemplateIoT from ISD-R FCI\n");
+		ASN_STRUCT_FREE(asn_DEF_ISDRProprietaryApplicationTemplateIoT, tmpl);
+		return;
+	}
+
+	ctx->isdr_fci.valid = true;
+	ctx->isdr_fci.ipae_supported =
+	    ipa_bit_string_get_named_bit(&tmpl->euiccConfiguration,
+					 ISDRProprietaryApplicationTemplateIoT__euiccConfiguration_ipaeSupported);
+
+	IPA_LOGP(SEUICC, LINFO, "eUICC reports IPAe %s, enabled profile: %s\n",
+		 ctx->isdr_fci.ipae_supported ? "supported" : "not supported",
+		 ipa_bit_string_get_named_bit(&tmpl->euiccConfiguration,
+					      ISDRProprietaryApplicationTemplateIoT__euiccConfiguration_enabledProfile)
+		 ? "yes" : "no");
+
+	/* Section 3.8.4: an eUICC with an IPAe runs it unless the device has claimed IPAd.  If the mode
+	 * is still unsettled when we learn this, the IPAe is what is in charge.  send_termcap() runs
+	 * before this today, so this does not fire -- it is the rule, not a guess about the order. */
+	if (ctx->ipa_mode == IPA_MODE_UNKNOWN && ctx->isdr_fci.ipae_supported)
+		ipa_euicc_set_ipa_mode(ctx, IPA_MODE_IPAE);
+
+	ASN_STRUCT_FREE(asn_DEF_ISDRProprietaryApplicationTemplateIoT, tmpl);
+}
+
+/* Fetch the FCI the ISD-R SELECT left waiting behind SW=61xx and hand it to parse_isdr_fci(). */
+static void get_isdr_fci(struct ipa_context *ctx, uint8_t fci_len)
+{
+	struct req_apdu req_apdu = { 0 };
+	struct res_apdu res_apdu = { 0 };
+	struct ipa_buf *buf_req = NULL;
+	struct ipa_buf *buf_res = NULL;
+
+	buf_res = ipa_buf_alloc(MAX_BLOCKSIZE_RX + 2);
+	assert(buf_res);
+
+	req_apdu.cla = GET_RESPONSE_CLA | ctx->cfg->euicc_channel;
+	req_apdu.ins = GET_RESPONSE_INS;
+	req_apdu.le = fci_len ? fci_len : 256;
+	buf_req = format_req_apdu(&req_apdu);
+
+	if (ipa_scard_transceive(ctx->scard_ctx, buf_res, buf_req) < 0) {
+		IPA_LOGP(SEUICC, LERROR, "unable to read the ISD-R FCI due to communication error\n");
+		ctx->check_scard = true;
+		goto exit;
+	}
+	if (parse_res_apdu(&res_apdu, buf_res) < 0 || (res_apdu.sw & 0xFF00) != 0x9000) {
+		IPA_LOGP(SEUICC, LERROR, "unable to read the ISD-R FCI, sw=%04x\n", res_apdu.sw);
+		goto exit;
+	}
+
+	parse_isdr_fci(ctx, res_apdu.data, res_apdu.le);
+exit:
+	IPA_FREE(buf_req);
+	IPA_FREE(buf_res);
 }
 
 /* Send terminal capablilities, see also 3gpp TS 102.221 V16.2.0, section 11.1.19.2.4 */
@@ -706,6 +932,9 @@ static int send_termcap(struct ipa_context *ctx)
 	}
 
 	IPA_LOGP(SEUICC, LINFO, "TERMINAL CAPABILITIES sent\n");
+	/* SGP.32 3.8.4: having declared IPAd support (tag '84', b1 = 1) and sending no
+	 * IpaeActivationRequest, the eUICC SHALL NOT activate the IPAe -- so from here on we are it. */
+	ipa_euicc_set_ipa_mode(ctx, IPA_MODE_IPAD);
 exit:
 	IPA_FREE(buf_req);
 	IPA_FREE(buf_res);
@@ -762,6 +991,10 @@ static int select_isd_r(struct ipa_context *ctx)
 	}
 
 	IPA_LOGP(SEUICC, LINFO, "ISD-R selected\n");
+
+	/* SW=61xx says how many FCI bytes are waiting. Reading them is best effort: SGP.32 3.8.4 puts
+	 * the SHALL on the eUICC, and nothing this IPA does depends on what the template says. */
+	get_isdr_fci(ctx, res_apdu.sw & 0x00FF);
 exit:
 	IPA_FREE(buf_req);
 	IPA_FREE(buf_res);
@@ -865,6 +1098,41 @@ int ipa_euicc_init_es10x(struct ipa_context *ctx)
 
 	rc = select_isd_r(ctx);
 	return rc;
+}
+
+/*! reset the eUICC and re-establish the communication channel between eUICC and IPAd.
+ *
+ *  An eUICC may refuse any further ES10b command with SW=6985 until it has been reset, in
+ *  particular after the active profile has changed. Closing and re-opening the logical
+ *  channel does not satisfy this: the card keeps answering MANAGE CHANNEL and SELECT, it
+ *  is only the ES10b STORE DATA commands that are rejected. The card must be reset on the
+ *  reader level.
+ *
+ *  \param[inout] ctx pointer to ipa_context.
+ *  \returns 0 on success, negative on error. */
+int ipa_euicc_reset_es10x(struct ipa_context *ctx)
+{
+	int rc;
+
+	rc = ipa_scard_reset(ctx->scard_ctx);
+	if (rc < 0) {
+		IPA_LOGP(SEUICC, LERROR, "unable to reset the eUICC\n");
+		ctx->check_scard = true;
+		return rc;
+	}
+
+	/* The reset dropped all logical channels and the TERMINAL CAPABILITIES the eUICC was
+	 * told about, so the initialization has to run again in full. */
+	rc = ipa_euicc_init_es10x(ctx);
+	if (rc < 0) {
+		IPA_LOGP(SEUICC, LERROR, "unable to re-initialize the ES10x link after the eUICC reset\n");
+		return rc;
+	}
+
+	/* SGP.32 6.3.2.6 reset(4): a reset can change profile states, so the eIM wants to hear about it. */
+	ipa_esipa_note_state_change(ctx, IPA_STATE_CHANGE_RESET);
+
+	return 0;
 }
 
 /*! close the communication channel between eUICC and IPAd.

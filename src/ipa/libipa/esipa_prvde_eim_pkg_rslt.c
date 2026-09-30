@@ -8,58 +8,35 @@
  * See also: GSMA SGP.32, section 5.14.6: Function (ESipa): ProvideEimPackageResult
  *
  * =====================================================================
- * v1.1/v1.2 migration notes for this file (MAJOR CHANGES — rewrite needed):
+ * v1.1/v1.2 migration notes for this file:
  * =====================================================================
- * UPDATE for v1.1: 5.14.6 / 6.3.2.7 — ProvideEimPackageResult was restructured
- *   from a top-level CHOICE to a SEQUENCE:
- *     ProvideEimPackageResult ::= [80] SEQUENCE {
- *       eidValue    [APPLICATION 26] Octet16 OPTIONAL,
- *       eimPackageResult EimPackageResult
- *     }
- *   where EimPackageResult is the CHOICE that used to be the outer type.
- *   All of the enc_prvde_eim_pkg_rslt_req() code below must be rewritten
- *   to populate the new wrapper: set .eidValue conditionally and assign
- *   the chosen branch into .eimPackageResult.choice.<branch>.
- *
- * UPDATE for v1.1: 6.3.2.7 — The eimPackageError INTEGER branch was replaced
- *   by eimPackageResultResponseError [0] EimPackageResultResponseError, which
- *   wraps the code with an optional eimTransactionId:
- *     EimPackageResultResponseError ::= SEQUENCE {
- *       eimTransactionId [0] TransactionId OPTIONAL,
- *       eimPackageResultErrorCode EimPackageResultErrorCode
- *     }
- *   The error-path fallback at the bottom of enc_prvde_eim_pkg_rslt_req()
- *   must be updated accordingly.
- *
- * UPDATE for v1.1: 6.3.2.7 — ePRAndNotifications.notificationList tag changed
- *   from [43] (SGP32-RetrieveNotificationsListResponse) to [0]
- *   (PendingNotificationList alias).  The existing field assignment of
- *   sgp32_notification_list into .notificationList will still compile but
- *   the wire format changes; consumer must extract the inner notification
- *   list rather than the full response.
- *
- * UPDATE for v1.1: 6.3.2.7 — ProvideEimPackageResultResponse changed from a
- *   SEQUENCE (with optional EimAcknowledgements) to a CHOICE with three
- *   branches: eimAcknowledgements, emptyResponse, provideEimPackageResultError.
- *   The decoder below unconditionally reads .eimAcknowledgements which will
- *   no longer type-check after regeneration.  Rewrite:
- *     switch (msg_to_ipa->choice.provideEimPackageResultResponse.present) {
- *     case ProvideEimPackageResultResponse_PR_eimAcknowledgements: ...
- *     case ProvideEimPackageResultResponse_PR_emptyResponse:       ...
- *     case ProvideEimPackageResultResponse_PR_provideEimPackageResultError: ...
- *     }
- *
- * UPDATE for v1.2: CR111002R00 — new error codes in provideEimPackageResultError:
- *   eidNotFound(2), invalidEid(3), missingEid(4).
- * UPDATE for v1.2: CR111003R00 — eimPackageResultErrorCode was removed from
- *   the old EimPackageResult; error now lives in eimPackageResultResponseError.
- * UPDATE for v1.2: CR12014R02 — clarified when EidValue must be included in
- *   ProvideEimPackageResult (see §5.14.6 procedure text).
+ * DONE for v1.1: 5.14.6 / 6.3.2.7 — ProvideEimPackageResult was restructured
+ *   from a top-level CHOICE into a SEQUENCE of an optional eidValue and an
+ *   EimPackageResult, which is now the CHOICE.  enc_prvde_eim_pkg_rslt_req()
+ *   fills the wrapper and assigns every branch into .eimPackageResult.
+ * DONE for v1.1: 6.3.2.7 — the eimPackageError INTEGER branch was replaced by
+ *   eimPackageResultResponseError [0], which wraps the code together with an
+ *   optional eimTransactionId.  Both error paths below use it.
+ * DONE for v1.1: 6.3.2.7 — ePRAndNotifications.notificationList moved to tag [0]
+ *   and carries the bare list, so the inner notificationList is extracted from
+ *   the RetrieveNotificationsListResponse the callers still hand over.
+ * DONE for v1.1: 6.3.2.7 — ProvideEimPackageResultResponse became a CHOICE of
+ *   eimAcknowledgements, emptyResponse and provideEimPackageResultError;
+ *   dec_prvde_eim_pkg_rslt_res() switches on all three.
+ * DONE for v1.2: CR111002R00 — provideEimPackageResultError carries eidNotFound,
+ *   invalidEid and missingEid.  All three mean the eIM could not tell which eUICC
+ *   the result came from and therefore did not process it, so the code is
+ *   reported to the caller in prvde_eim_pkg_rslt_err rather than being logged and
+ *   dropped: an accepted-with-no-acknowledgements response is otherwise
+ *   indistinguishable from a rejection.
+ * DONE for v1.2: CR111003R00 — eimPackageResultErrorCode no longer sits at the
+ *   top level of EimPackageResult.
+ * DONE for v1.2: CR12014R02 — section 5.14.6 NOTE 1 requires EidValue whenever
+ *   the eIM has no other means of identifying the eUICC; it is always sent.
  * =====================================================================
  */
 
 #include <stdint.h>
-#include <assert.h>
 #include <string.h>
 #include <onomondo/ipa/mem.h>
 #include <onomondo/ipa/utils.h>
@@ -69,9 +46,9 @@
 #include <EsipaMessageFromIpaToEim.h>
 #include <ProvideEimPackageResult.h>
 #include <SGP32-PendingNotificationList.h>
-/* TODO v1.1: 6.3.2.7 — after libasn regeneration, replace the include below
- * with <PendingNotificationList.h> (the new alias).  The old
- * SGP32-RetrieveNotificationsListResponse is no longer used on this path. */
+/* 6.3.2.7: the notification list itself is the SGP32-PendingNotificationList alias, encoded
+ * below through asn_DEF_SGP32_PendingNotificationList.  This include stays because
+ * SGP32-RetrieveNotificationsListResponse is still the CHOICE that carries it. */
 #include <SGP32-RetrieveNotificationsListResponse.h>
 #include "utils.h"
 #include "length.h"
@@ -131,7 +108,11 @@ static size_t der_write_length(uint8_t *p, size_t val)
  *  Without notifications (euiccPackageResult arm):
  *    BF 51 ...         raw EuiccPackageResult bytes (identifies the CHOICE arm)
  *
- *  \param[in] raw_euicc_pkg_result  Raw BER bytes from ES10b.LoadEuiccPackage.
+ *  A notification list that cannot be encoded is dropped and the euiccPackageResult
+ *  arm is produced instead; only a missing or empty raw_euicc_pkg_result, a failed
+ *  allocation or an inconsistent length header makes this fail outright.
+ *
+ *  \param[in] raw_euicc_pkg_result  Raw BER bytes from ES10b.LoadEuiccPackage; must be non-empty.
  *  \param[in] sgp32_notif_list      May be NULL; PR_notificationList is used.
  *  \returns heap-allocated ipa_buf with DER bytes, or NULL on error. */
 struct ipa_buf *ipa_esipa_build_eim_pkg_result_der(
@@ -143,20 +124,47 @@ struct ipa_buf *ipa_esipa_build_eim_pkg_result_der(
 	size_t off = 0;
 	size_t inner_len, seq_hdr_bytes, total_len;
 
+	if (!raw_euicc_pkg_result || raw_euicc_pkg_result->len == 0) {
+		IPA_LOGP_ESIPA("ProvideEimPackageResult", LERROR,
+			       "no raw EuiccPackageResult bytes to embed, cannot build EimPackageResult\n");
+		return NULL;
+	}
+
 	if (sgp32_notif_list &&
 	    sgp32_notif_list->present == SGP32_RetrieveNotificationsListResponse_PR_notificationList) {
+		asn_enc_rval_t rc_enc;
+
 		/* DER-encode the SGP32-PendingNotificationList (SEQUENCE OF → tag 0x30).
 		 * In ePRAndNotifications it appears as notificationList [0] IMPLICIT, so
 		 * the UNIVERSAL SEQUENCE tag 0x30 is replaced by CONTEXT [0] CONSTRUCTED
 		 * 0xA0. */
-		der_encode(&asn_DEF_SGP32_PendingNotificationList,
-			   IPA_ASN_PTR_RW(&sgp32_notif_list->choice.notificationList),
-			   ipa_asn1c_consume_bytes_cb, &notif_enc);
-		if (!notif_enc || notif_enc->len == 0) {
+		rc_enc = der_encode(&asn_DEF_SGP32_PendingNotificationList,
+				    IPA_ASN_PTR_RW(&sgp32_notif_list->choice.notificationList),
+				    ipa_asn1c_consume_bytes_cb, &notif_enc);
+
+		/* Every failure below drops the notifications and sends the bare
+		 * euiccPackageResult arm instead of failing the whole message.  The two
+		 * losses are not symmetric: the eUICC has already retired the eUICC
+		 * Package once it handed us the result, so a result we fail to deliver is
+		 * gone for good, while notifications stay pending until the eIM
+		 * acknowledges them (section 5.14.6) and are simply retried on the next
+		 * round. */
+		if (rc_enc.encoded <= 0 || !notif_enc || notif_enc->len == 0) {
+			IPA_LOGP_ESIPA("ProvideEimPackageResult", LERROR,
+				       "cannot DER-encode the notification list, sending the EuiccPackageResult without it (the notifications stay pending)\n");
+			IPA_FREE(notif_enc);
+			notif_enc = NULL;
+		} else if (notif_enc->data[0] != 0x30) {
+			/* The [0] IMPLICIT re-tag below only holds if the encoder really
+			 * produced a UNIVERSAL SEQUENCE, which is what a SEQUENCE OF is.
+			 * Overwriting anything else would emit a tag that does not match
+			 * the value that follows it. */
+			IPA_LOGP_ESIPA("ProvideEimPackageResult", LERROR,
+				       "notification list encodes to tag 0x%02x, expected UNIVERSAL SEQUENCE 0x30; sending the EuiccPackageResult without it (the notifications stay pending)\n",
+				       notif_enc->data[0]);
 			IPA_FREE(notif_enc);
 			notif_enc = NULL;
 		} else {
-			assert(notif_enc->data[0] == 0x30);
 			notif_enc->data[0] = 0xA0;
 		}
 	}
@@ -180,8 +188,19 @@ struct ipa_buf *ipa_esipa_build_eim_pkg_result_der(
 		off += raw_euicc_pkg_result->len;
 		memcpy(result->data + off, notif_enc->data, notif_enc->len);
 		off += notif_enc->len;
+
+		/* der_length_size() sized the header that der_write_length() then wrote;
+		 * if the two ever disagree the length field would not describe the bytes
+		 * that follow it, so check rather than trust. */
+		if (off != total_len) {
+			IPA_LOGP_ESIPA("ProvideEimPackageResult", LERROR,
+				       "EimPackageResult DER length mismatch (wrote %zu bytes, sized %zu)\n",
+				       off, total_len);
+			IPA_FREE(result);
+			result = NULL;
+			goto err;
+		}
 		result->len = total_len;
-		assert(off == total_len);
 	} else {
 		/*
 		 * euiccPackageResult arm: the raw bytes already carry the BF51 outer
@@ -205,6 +224,32 @@ err:
  *     <eim_pkg_der> EimPackageResult  (CHOICE, no outer tag — built by
  *                                      ipa_esipa_build_eim_pkg_result_der)
  */
+/* Why the eIM refused the eIM Package Result (SGP.32, section 6.3.2.7). All three named codes say the
+ * eIM could not work out which eUICC the result belongs to, which is what eidValue exists to prevent. */
+#define PEPR_ERR(name) \
+	{ ProvideEimPackageResultResponse__provideEimPackageResultError_##name, #name }
+static const struct num_str_map error_code_strings[] = {
+	/* NEW in v1.2: CR111002R00 */
+	PEPR_ERR(eidNotFound),
+	PEPR_ERR(invalidEid),
+	PEPR_ERR(missingEid),
+	PEPR_ERR(undefinedError),
+	{ 0, NULL }
+};
+
+/*! Name of an ESipa.ProvideEimPackageResult error code, for log messages.
+ *  \param[in] err the error code as decoded from the eIM response.
+ *  \returns the code's name from the ASN.1 definition (section 6.3.2.7), or "(unknown)".
+ *
+ *  Shared by both wire bindings on purpose: the JSON binding carries the same codes, and the two
+ *  must not describe one code by two different names. */
+const char *ipa_esipa_prvde_eim_pkg_rslt_err_str(long err)
+{
+	return ipa_str_from_num(error_code_strings, err, "(unknown)");
+}
+
+#ifdef IPA_HAVE_ESIPA_ASN1		/* ESipa ASN.1 binding, SGP.32 section 6.3 */
+#undef PEPR_ERR
 static struct ipa_buf *enc_prvde_eim_pkg_rslt_req_passthru(
 	const struct ipa_context *ctx,
 	const struct ipa_esipa_prvde_eim_pkg_rslt_req *req)
@@ -249,7 +294,16 @@ static struct ipa_buf *enc_prvde_eim_pkg_rslt_req_passthru(
 	memcpy(result->data + off, eim_pkg_der->data, eim_pkg_der->len);
 	off += eim_pkg_der->len;
 
-	assert(off == total_len);
+	/* Same reasoning as in ipa_esipa_build_eim_pkg_result_der(): the outer BF 50
+	 * length was sized before the body was written. */
+	if (off != total_len) {
+		IPA_LOGP_ESIPA("ProvideEimPackageResult", LERROR,
+			       "provideEimPackageResult DER length mismatch (wrote %zu bytes, sized %zu)\n",
+			       off, total_len);
+		IPA_FREE(result);
+		result = NULL;
+		goto err;
+	}
 	result->len = total_len;
 
 err:
@@ -295,6 +349,13 @@ static struct ipa_buf *enc_prvde_eim_pkg_rslt_req(const struct ipa_context *ctx,
 		pepr->eimPackageResult.present = EimPackageResult_PR_eimPackageResultResponseError;
 		pepr->eimPackageResult.choice.eimPackageResultResponseError.eimPackageResultErrorCode =
 		    req->eim_pkg_err;
+		/* Section 6.3.2.7: "If eimTransactionId was present in the eIM Package, the IPA SHALL
+		 * return the same eimTransactionId". Without it the eIM cannot tell which of the
+		 * operations it dispatched this rejection belongs to, which is the whole reason it sent
+		 * an id in the first place. The cast drops const the same way eidValue does above; the
+		 * encoder only reads it. */
+		pepr->eimPackageResult.choice.eimPackageResultResponseError.eimTransactionId =
+		    (TransactionId_t *) req->eim_transaction_id;
 	} else if (req->euicc_package_result && req->sgp32_notification_list) {
 		pepr->eimPackageResult.present = EimPackageResult_PR_ePRAndNotifications;
 		pepr->eimPackageResult.choice.ePRAndNotifications.euiccPackageResult =
@@ -325,6 +386,8 @@ static struct ipa_buf *enc_prvde_eim_pkg_rslt_req(const struct ipa_context *ctx,
 		pepr->eimPackageResult.present = EimPackageResult_PR_eimPackageResultResponseError;
 		pepr->eimPackageResult.choice.eimPackageResultResponseError.eimPackageResultErrorCode =
 		    EimPackageResultErrorCode_undefinedError;
+		pepr->eimPackageResult.choice.eimPackageResultResponseError.eimTransactionId =
+		    (TransactionId_t *) req->eim_transaction_id;
 	}
 
 	enc = ipa_esipa_msg_to_eim_enc(&msg_to_eim, "ProvideEimPackageResult");
@@ -358,10 +421,12 @@ struct ipa_esipa_prvde_eim_pkg_rslt_res *dec_prvde_eim_pkg_rslt_res(const struct
 		res->eim_acknowledgements = NULL;
 		break;
 	case ProvideEimPackageResultResponse_PR_provideEimPackageResultError:
+		res->prvde_eim_pkg_rslt_err =
+		    msg_to_ipa->choice.provideEimPackageResultResponse.choice.provideEimPackageResultError;
 		IPA_LOGP_ESIPA("ProvideEimPackageResult", LERROR,
-			       "eIM rejected the result with error code %ld\n",
-			       msg_to_ipa->choice.provideEimPackageResultResponse
-				   .choice.provideEimPackageResultError);
+			       "eIM rejected the result with error code %ld=%s!\n",
+			       res->prvde_eim_pkg_rslt_err,
+			       ipa_str_from_num(error_code_strings, res->prvde_eim_pkg_rslt_err, "(unknown)"));
 		res->eim_acknowledgements = NULL;
 		break;
 	default:
@@ -373,7 +438,7 @@ struct ipa_esipa_prvde_eim_pkg_rslt_res *dec_prvde_eim_pkg_rslt_res(const struct
 	return res;
 }
 
-static struct ipa_buf *enc_prvde_eim_pkg_rslt_req_cb(struct ipa_context *ctx, const void *req)
+struct ipa_buf *ipa_esipa_prvde_eim_pkg_rslt_enc_req(struct ipa_context *ctx, const void *req)
 {
 	return enc_prvde_eim_pkg_rslt_req(ctx, req);
 }
@@ -384,6 +449,9 @@ static void *dec_prvde_eim_pkg_rslt_res_cb(const struct ipa_buf *res, const void
 	return dec_prvde_eim_pkg_rslt_res(res);
 }
 
+#endif /* IPA_HAVE_ESIPA_ASN1 */
+
+#ifdef IPA_HAVE_ESIPA_JSON		/* ESipa JSON binding, SGP.32 section 6.4 */
 static struct ipa_buf *json_enc_prvde_eim_pkg_rslt_req(struct ipa_context *ctx, const void *req)
 {
 	return ipa_esipa_json_enc_prvde_eim_pkg_rslt_req(ctx, req);
@@ -394,6 +462,8 @@ static void *json_dec_prvde_eim_pkg_rslt_res(const struct ipa_buf *res, const vo
 	(void)req;
 	return ipa_esipa_json_dec_prvde_eim_pkg_rslt_res(res);
 }
+
+#endif /* IPA_HAVE_ESIPA_JSON */
 
 /*! Function (ESipa): ProvideEimPackageResult.
  *  \param[inout] ctx pointer to ipa_context.
@@ -406,13 +476,68 @@ struct ipa_esipa_prvde_eim_pkg_rslt_res *ipa_esipa_prvde_eim_pkg_rslt(struct ipa
 		       "Providing eUICC package result and eUICC notifications to eIM\n");
 
 	return ipa_esipa_call(ctx, "ProvideEimPackageResult", req,
-			      enc_prvde_eim_pkg_rslt_req_cb, dec_prvde_eim_pkg_rslt_res_cb,
-			      json_enc_prvde_eim_pkg_rslt_req, json_dec_prvde_eim_pkg_rslt_res);
+			      IPA_ESIPA_ASN1_CB(ipa_esipa_prvde_eim_pkg_rslt_enc_req, dec_prvde_eim_pkg_rslt_res_cb),
+			      IPA_ESIPA_JSON_CB(json_enc_prvde_eim_pkg_rslt_req, json_dec_prvde_eim_pkg_rslt_res));
+}
+
+static const struct num_str_map eim_pkg_result_error_strings[] = {
+	{ EimPackageResultErrorCode_invalidPackageFormat, "invalidPackageFormat" },
+	{ EimPackageResultErrorCode_unknownPackage, "unknownPackage" },
+	{ EimPackageResultErrorCode_undefinedError, "undefinedError" },
+	{ 0, NULL }
+};
+
+/*! Tell the eIM that an eIM Package it dispatched could not be used.
+ *
+ * SGP.32, sections 3.2.3.1 and 3.2.3.2, steps 3 and 4: "the IPA SHALL return invalidPackageFormat error
+ * and the procedure SHALL stop."  Stopping on its own is not enough -- the eIM keeps the operation
+ * pending until it times out, and from its side an IPA that goes quiet after GetEimPackage is
+ * indistinguishable from one that lost power mid-download.
+ *
+ * The result travels as an eIM Package Result, which section 3.1.1.1 step 6 delivers with
+ * ESipa.ProvideEimPackageResult -- the same function the successful paths use.
+ *
+ * A failure to deliver the report is logged and swallowed: the caller is already on its way out with
+ * the original error, and replacing that error with a transport one would hide what actually went
+ * wrong.
+ *  \param[inout] ctx pointer to ipa_context.
+ *  \param[in] err the EimPackageResultErrorCode to report.
+ *  \param[in] eim_transaction_id the id the eIM Package carried, NULL when it carried none. */
+void ipa_esipa_report_eim_pkg_err(struct ipa_context *ctx, long err, const TransactionId_t *eim_transaction_id)
+{
+	struct ipa_esipa_prvde_eim_pkg_rslt_req prvde_eim_pkg_rslt_req = { 0 };
+	struct ipa_esipa_prvde_eim_pkg_rslt_res *prvde_eim_pkg_rslt_res;
+
+	prvde_eim_pkg_rslt_req.eim_pkg_err = err;
+	prvde_eim_pkg_rslt_req.eim_transaction_id = eim_transaction_id;
+
+	IPA_LOGP(SIPA, LINFO, "reporting eIM package result error code %ld=%s to the eIM\n", err,
+		 ipa_str_from_num(eim_pkg_result_error_strings, err, "(unknown)"));
+
+	prvde_eim_pkg_rslt_res = ipa_esipa_prvde_eim_pkg_rslt(ctx, &prvde_eim_pkg_rslt_req);
+	if (!prvde_eim_pkg_rslt_res) {
+		IPA_LOGP(SIPA, LERROR,
+			 "unable to report the eIM package result error to the eIM, it will have to time the operation out\n");
+		return;
+	}
+	if (prvde_eim_pkg_rslt_res->prvde_eim_pkg_rslt_err)
+		IPA_LOGP(SIPA, LERROR, "the eIM rejected the eIM package result error report (error code %ld)\n",
+			 prvde_eim_pkg_rslt_res->prvde_eim_pkg_rslt_err);
+	ipa_esipa_prvde_eim_pkg_rslt_free(prvde_eim_pkg_rslt_res);
 }
 
 /*! Free results of function (ESipa): ProvideEimPackageResult.
  *  \param[in] res pointer to function result. */
 void ipa_esipa_prvde_eim_pkg_rslt_free(struct ipa_esipa_prvde_eim_pkg_rslt_res *res)
 {
+	/* The two bindings own their result members differently, and IPA_ESIPA_RES_FREE only knows the
+	 * ASN.1 model: there every member points into msg_to_ipa, so freeing that one tree frees
+	 * everything.  The JSON decoders allocate their members instead and leave msg_to_ipa NULL, which
+	 * is what distinguishes the two at run time -- both bindings are compiled in and the choice is
+	 * ctx->cfg->esipa_binding.  This is the "caller must free those first" case the macro's own
+	 * comment describes.
+	 */
+	if (res && !res->msg_to_ipa)
+		ASN_STRUCT_FREE(asn_DEF_EimAcknowledgements, res->eim_acknowledgements);
 	IPA_ESIPA_RES_FREE(res);
 }

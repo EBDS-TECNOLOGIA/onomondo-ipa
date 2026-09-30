@@ -39,8 +39,8 @@ static const struct num_str_map error_code_strings_sgp32[] = {
 
 /* Convert the response into SGP32 format.
  * Each ProfileInfo element is re-encoded as DER and decoded as SGP32_ProfileInfo
- * so that the extension fields (fallbackAttribute, emergencyCallAttribute) default
- * to NULL for consumer eUICCs that do not set them. */
+ * so that the SGP.32 extension fields (ecallIndication, fallbackAttribute,
+ * fallbackAllowed) come out absent for consumer eUICCs, which never send them. */
 static struct SGP32_ProfileInfoListResponse *convert_res_to_sgp32(struct ProfileInfoListResponse *res)
 {
 	struct SGP32_ProfileInfoListResponse *sgp32_res;
@@ -153,6 +153,84 @@ static int dec_get_prfle_info_res_sgp32(struct ipa_es10c_get_prfle_info_res *res
 	return 0;
 }
 
+const struct SGP32_ProfileInfo *ipa_es10c_prfle_by_iccid(const struct ipa_es10c_get_prfle_info_res *res,
+							 const uint8_t *iccid)
+{
+	int i;
+
+	if (!res || !res->sgp32_res || !iccid ||
+	    res->sgp32_res->present != SGP32_ProfileInfoListResponse_PR_profileInfoListOk)
+		return NULL;
+
+	for (i = 0; i < res->sgp32_res->choice.profileInfoListOk.list.count; i++) {
+		const struct SGP32_ProfileInfo *prfle_info = res->sgp32_res->choice.profileInfoListOk.list.array[i];
+
+		if (prfle_info->iccid && prfle_info->iccid->size == IPA_LEN_ICCID &&
+		    !memcmp(prfle_info->iccid->buf, iccid, IPA_LEN_ICCID))
+			return prfle_info;
+	}
+
+	return NULL;
+}
+
+bool ipa_es10c_prfle_is_enabled(const struct SGP32_ProfileInfo *prfle_info)
+{
+	return prfle_info && prfle_info->profileState && *prfle_info->profileState == ProfileState_enabled;
+}
+
+bool ipa_es10c_ecall_prfle_enabled(const struct ipa_es10c_get_prfle_info_res *res)
+{
+	int i;
+
+	if (!res || !res->sgp32_res ||
+	    res->sgp32_res->present != SGP32_ProfileInfoListResponse_PR_profileInfoListOk)
+		return false;
+
+	for (i = 0; i < res->sgp32_res->choice.profileInfoListOk.list.count; i++) {
+		const struct SGP32_ProfileInfo *prfle_info = res->sgp32_res->choice.profileInfoListOk.list.array[i];
+
+		/* ecallIndication is OPTIONAL and BOOLEAN: absent and present-but-false both mean "not the
+		 * Emergency Profile". A consumer eUICC never sends it at all. */
+		if (!prfle_info->ecallIndication || !*prfle_info->ecallIndication)
+			continue;
+		if (ipa_es10c_prfle_is_enabled(prfle_info))
+			return true;
+	}
+
+	return false;
+}
+
+/*! Which Profile carries the Fallback Attribute?
+ *  \param[in] res result of ipa_es10c_get_prfle_info(), may be NULL or hold an error.
+ *  \returns the Fallback Profile, NULL when no Profile is tagged.
+ *
+ *  SGP.32 section 4.4 puts the flag in the Profile Metadata and adds "It SHALL NOT be possible to have
+ *  multiple Profiles on an eUICC with the fallbackAttribute set to TRUE", so at most one Profile can
+ *  match; the first is returned without looking for a second.
+ *
+ *  A consumer eUICC has no Metadata to hold the flag and never reports it, so this returns NULL under
+ *  the IoT eUICC emulation no matter which Profile the emulation considers the Fallback Profile --
+ *  that one is recorded in nvstate instead (see IPA_EMU_FALLBACK_SET). */
+const struct SGP32_ProfileInfo *ipa_es10c_fallback_prfle(const struct ipa_es10c_get_prfle_info_res *res)
+{
+	int i;
+
+	if (!res || !res->sgp32_res ||
+	    res->sgp32_res->present != SGP32_ProfileInfoListResponse_PR_profileInfoListOk)
+		return NULL;
+
+	for (i = 0; i < res->sgp32_res->choice.profileInfoListOk.list.count; i++) {
+		const struct SGP32_ProfileInfo *prfle_info = res->sgp32_res->choice.profileInfoListOk.list.array[i];
+
+		/* DEFAULT FALSE rather than OPTIONAL: an absent flag means the Profile is not the Fallback
+		 * Profile, which is the same answer as a present-and-false one. */
+		if (prfle_info->fallbackAttribute && *prfle_info->fallbackAttribute)
+			return prfle_info;
+	}
+
+	return NULL;
+}
+
 /* Find the currently active profile */
 static void find_currently_active_prfle(struct ipa_es10c_get_prfle_info_res *res)
 {
@@ -202,7 +280,7 @@ struct ipa_es10c_get_prfle_info_res *ipa_es10c_get_prfle_info(struct ipa_context
 		goto error;
 	}
 
-	if (ctx->cfg->iot_euicc_emu_enabled) {
+	if (IPA_EUICC_EMU(ctx)) {
 		IPA_LOGP_ES10X("GetProfilesInfo", LINFO,
 			       "IoT eUICC emulation active, will derive SGP32_ProfileInfoListResponse from (SGP.22) ProfileInfoListResponse.\n");
 		rc = dec_get_prfle_info_res(res, es10c_res);

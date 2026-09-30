@@ -5,12 +5,14 @@ element in the 3GPP IoT eSIM system as described in SGP.31 and SGP.32. It interf
 and the eIM (via HTTPS) on the other side. The implementation presented here can run on a regular Linux host. It can also be used
 as a library to add IPAd functionality to an IoT device that runs an RTOS.
 
-This code originally implemented SGP.32 v1.0.  An **in-progress migration to
-SGP.32 v1.2** is underway — see [MIGRATION.md](MIGRATION.md) for the full plan,
-per-section status, and a checklist of remaining work.  Every changed line in
-the schema and source carries an inline marker of the form
-`UPDATE for v1.1: <section>` / `UPDATE for v1.2: <CR>` / `NEW in v1.1/v1.2:<section>` / `TODO v1.1/v1.2: <section>` so the diff against the v1.0 baseline
-is traceable end-to-end.
+This code originally implemented SGP.32 v1.0 and has since been **migrated to
+SGP.32 v1.2** — see [MIGRATION.md](MIGRATION.md) for what that covered and what
+is deliberately still open, and [MIGRATION_STATUS.md](MIGRATION_STATUS.md) for
+the current build and test state.  Every changed line in the schema and source
+carries an inline marker of the form `UPDATE for v1.1: <section>` /
+`UPDATE for v1.2: <CR>` / `NEW in v1.1/v1.2: <section>` /
+`DONE for v1.2: <CR>`, so the diff against the v1.0 baseline is traceable
+end-to-end.
 
 This effort to bring the project to SGP.32 v1.2 is independent from the one going on at the `project/nrf-ipa-v1.2` branch of the original [project](https://github.com/onomondo/onomondo-ipa).
 
@@ -38,6 +40,21 @@ available. The emulation replaces missing IoT eUICC functionality by calling an 
 as a replacement. In case no equivalent function is available, the function is emulated by onomondo-ipa directly. This
 is in particular the case for the functions related to the management of the eIM configuration.
 
+The emulation is a build option and is **not** built by default, see `-DIOT_EUICC_EMULATION` under Options below.
+
+#### Limitation: eUICC Package Results are not signed
+
+A consumer eUICC cannot sign an eUICC Package Result. SGP.32 section 2.11.2.1 requires `euiccSignEPR` over
+`euiccPackageResultDataSigned` concatenated with the `associationToken`, created with `SK.EUICC.ECDSA`; that key never
+leaves the eUICC, and SGP.22 ES10 provides no function that signs caller-supplied data. The emulation therefore fills
+`euiccSignEPR` with a fixed placeholder, and the `seqNumber` of the result is always 0 rather than one assigned by the
+eUICC.
+
+An eIM that follows section 5.14.6 verifies the signature and the sequence number and discards the result if either
+fails, so **eUICC Package execution results produced under `-E` will not be accepted by a conforming eIM**. Profile
+download and the notifications around it are unaffected: those are signed by the eUICC itself and are passed through
+untouched. Use the emulation to exercise the IPA against real hardware, not to validate an eIM integration end to end.
+
 
 Installation
 ------------
@@ -49,16 +66,29 @@ C-compiler. However, onomondo-ipa still requires platform dependent modules that
 to access the eUICC via some sort of smart card reader. This repository ships with a sample implementation of those
 platform-dependent modules that can run on a standard Linux system:
 
-* `http.c`: Contains a libcurl based implementation to make HTTP(s) requests.
+* `http.c`: Contains a libcurl based implementation to make HTTP(s) requests.  It also uses OpenSSL
+  directly, to install the eUICC-provisioned TLS credentials (SGP.32 `trustedPublicKeyDataTls`) into
+  the handshake via `CURLOPT_SSL_CTX_FUNCTION`.
 * `scard.c`: Contains a libpcsclite based implementation to access the eUICC.
 
 On a Debian GNU/Linux system, the following packages are required:
 
 * `asn1c`
-* `libcurl4-gnutls-dev`
+* `libcurl4-openssl-dev`
+* `libssl-dev`
 * `libpcsclite-dev`
+* `libjansson-dev`
+* `pkg-config`
 * `build-essential`
 * `cmake`
+
+`libjansson-dev` and `pkg-config` are needed only by the ESipa JSON binding, which is built by default.  A build
+configured with `-DESIPA_BINDING_JSON=OFF` does not need either; see Options below.
+
+The OpenSSL flavour of libcurl is required, not the GnuTLS one: `CURLOPT_SSL_CTX_FUNCTION` is
+implemented only on OpenSSL-family backends.  Against a GnuTLS-backed libcurl that option fails
+with `CURLE_NOT_BUILT_IN`, `http.c` logs the loss and carries on with the system trust store, and
+the eUICC-provisioned trust anchor is never installed.
 
 On a Debian system, the standard `apt-get install ...` command can be used to install those dependencies.
 
@@ -124,6 +154,44 @@ cmake --build build-android      # -> build-android/src/ipa/libipacore.so
 Note: `asn1c` must be installed on the build **host** (it is a code generator);
 the eUICC backend is a stub until Phase 1 lands the JNI transport, so the
 resulting `.so` links but does not yet talk to a real eUICC.
+* `-DCERT_ALLOW_UNSET_CLOCK`
+onomondo-ipa checks the validity period (notBefore/notAfter) of the SM-DP+ certificates it receives, since the eUICC
+verifies those certificates but has no clock to check them against. That check needs a system clock that can be
+trusted. By default a clock that is unset (it reads earlier than 2025-01-01) fails the check and the certificate is
+refused. Enable this option for a device that has no battery-backed RTC and can only learn the time over an IP
+connection it does not have until it is provisioned: an unset clock then skips the check (with a log message)
+instead of failing it. Note that this weakens the check, as an attacker who can keep the clock unset also keeps the
+check away.
+* `-DPPR_ALLOW_WITHOUT_CONSENT`
+the Rules Authorisation Table of an eUICC can mark a Profile Policy Rule as one the end user has to consent to before
+a profile carrying it may be installed. A device with a user interface answers that by registering
+`ipa_config.ppr_consent_cb`, which is handed the rules in question together with the profile name and service
+provider name, and returns the end user's decision. A device without a user interface has nobody to ask; this option
+decides what it does instead. By default such a profile is refused. Enable this option to install it as if consent
+had been given. Note that SGP.32 section 3.2.3.1 observes that IoT devices without a user interface are not expected
+to be given a RAT that demands consent in the first place, so needing this option usually points at a RAT that does
+not suit the device.
+* `-DIOT_EUICC_EMULATION`
+build the IoT eUICC emulation described under ES10x above, which lets a consumer (SGP.22) eUICC be used where an IoT
+(SGP.32) one is expected. **Off by default**: a product ships with the eUICC it ships with, and a build that will
+never meet a consumer card should not carry the adaptation layer -- it is about 17 kB of the image. Without it the
+`-E` command-line option is gone and `ipa_init()` refuses a configuration that sets
+`ipa_config.iot_euicc_emu_enabled`, rather than quietly ignoring it. libipa defines `IPA_HAVE_IOT_EUICC_EMULATION`
+when the emulation is built.
+* `-DESIPA_BINDING_ASN1`, `-DESIPA_BINDING_JSON`
+the two ESipa wire bindings of SGP.32 v1.2 (sections 6.3 and 6.4). Both are built by default; a deployment that
+knows which binding its eIM speaks can drop the other, and at least one has to remain. The JSON binding needs
+jansson, and asking for it without jansson present is an error rather than a silent downgrade -- pass
+`-DESIPA_BINDING_JSON=OFF` if that is what you meant. libipa defines `IPA_HAVE_ESIPA_ASN1` and `IPA_HAVE_ESIPA_JSON`
+for the bindings it has, and selecting one the build does not have makes `ipa_init()` fail. Note that ASN.1 is the
+zero value of `ipa_config.esipa_binding`, so a JSON-only build has to set that field explicitly.
+
+#### What the build leaves out
+
+The ASN.1 codec is generated without the codecs this project cannot reach: nothing here reads or writes XER, and the
+asn1c type printers are only reachable under `-DSHOW_ASN_OUTPUT`. Together with link-time dead code elimination
+(`-ffunction-sections`/`--gc-sections`, enabled for GCC and Clang) that is roughly 30 kB of image that used to be
+carried but never executed. Nothing needs to be passed for this; it is how the codec is generated.
 
 
 Usage
@@ -141,7 +209,9 @@ There are a number of command-line options supported. The most relevant options 
 * `-f` specifies the path to an initial eIM configuration file.
 * `-I` omit verification of the SSL certificate of the eIM. This option makes the operation of onomondo-ipa insecure,
 but may be helpful for testing and debugging in lab setups.
-* `-E` enable the IoT eUICC emulation in case a regular consumer eUICC should be used.
+* `-E` enable the IoT eUICC emulation in case a regular consumer eUICC should be used. Only present when built with
+`-DIOT_EUICC_EMULATION=ON`.
+* `-j` use the JSON ESipa binding instead of ASN.1. Only present when both bindings are built.
 
 The sample app also exposes the SGP.32 v1.1 ES10b trigger functions as one-shot
 options (they run once against the eUICC and exit): `-i` ImmediateEnable,

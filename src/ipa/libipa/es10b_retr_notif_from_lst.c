@@ -13,11 +13,8 @@
  * =====================================================================
  * UPDATE for v1.1: 5.9.11 — The SGP.32 SGP32-RetrieveNotificationsListResponse
  *   dropped the `notificationAndEprList` CHOICE branch and switched to alias
- *   types PendingNotificationList / EuiccPackageResultList.  The decoder
- *   below still references SGP32_RetrieveNotificationsListResponse_PR_notificationAndEprList;
- *   that enumerator will disappear after libasn regeneration and the case
- *   MUST be removed from dec_retr_notif_from_lst_res_sgp32().  The encode
- *   path does not emit notificationAndEprList so no change is needed there.
+ *   types SGP32-PendingNotificationList / EuiccPackageResultList.  The enumerator is gone
+ *   from the regenerated codec and the decoder no longer references it.
  * UPDATE for v1.1: 2.11.1.2 — the foreign search criteria come from the new
  *   IpaEuiccDataRequest.searchCriteriaNotification (the euiccPackageResults
  *   branch moved to the sibling searchCriteriaEuiccPackageResult field).
@@ -287,7 +284,7 @@ struct ipa_es10b_retr_notif_from_lst_res *ipa_es10b_retr_notif_from_lst(struct i
 	struct ipa_es10b_retr_notif_from_lst_res *res = IPA_ALLOC_ZERO(struct ipa_es10b_retr_notif_from_lst_res);
 	int rc;
 
-	if (ctx->cfg->iot_euicc_emu_enabled)
+	if (IPA_EUICC_EMU(ctx))
 		es10b_req = enc_retr_notif_from_lst_req(req);
 	else
 		es10b_req = enc_retr_notif_from_lst_req_sgp32(req);
@@ -302,7 +299,7 @@ struct ipa_es10b_retr_notif_from_lst_res *ipa_es10b_retr_notif_from_lst(struct i
 		goto error;
 	}
 
-	if (ctx->cfg->iot_euicc_emu_enabled) {
+	if (IPA_EUICC_EMU(ctx)) {
 		IPA_LOGP_ES10X("RetrieveNotificationsList", LINFO,
 			       "IoT eUICC emulation active, will derive notificationList from (SGP.22) RetrieveNotificationsListResponse.\n");
 		rc = dec_retr_notif_from_lst_res(res, es10b_res);

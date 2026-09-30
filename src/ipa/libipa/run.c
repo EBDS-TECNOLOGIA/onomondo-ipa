@@ -201,7 +201,15 @@ int ipa_run(struct ipa_run_config *rcfg)
 		rc = ipa_add_init_eim_cfg(ctx, eim_cfg);
 		IPA_FREE(eim_cfg);
 	} else if (rcfg->euicc_memory_reset) {
-		rc = ipa_euicc_mem_rst(ctx, true, true, true, true, true);
+		/* The JSON "euicc_memory_reset" is the configuration-file equivalent of the CLI's -m, so it
+		 * selects the same set: everything except the Provisioning Profiles, which carry the
+		 * bootstrap connectivity and must be asked for deliberately (see main.c, case 'm'). */
+		rc = ipa_euicc_mem_rst(ctx, IPA_EUICC_MEM_RST_OPERATIONAL_PROFILES |
+				       IPA_EUICC_MEM_RST_FIELD_LOADED_TEST_PROFILES |
+				       IPA_EUICC_MEM_RST_PRE_LOADED_TEST_PROFILES |
+				       IPA_EUICC_MEM_RST_DEFAULT_SMDP_ADDR |
+				       IPA_EUICC_MEM_RST_EIM_CFG_DATA |
+				       IPA_EUICC_MEM_RST_IMMEDIATE_ENABLE_CFG);
 	} else {
 		IPA_LOGP(SMAIN, LINFO, "-----------------------------8<-----------------------------\n");
 		rc = eim_init(ctx);

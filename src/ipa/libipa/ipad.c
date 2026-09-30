@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <assert.h>
+#include <stddef.h>
 #include <string.h>
 #include <onomondo/ipa/mem.h>
 #include <onomondo/ipa/http.h>
@@ -19,10 +20,15 @@
 #include "context.h"
 #include "euicc.h"
 #include "esipa.h"
+#include "es10c_get_prfle_info.h"
 #include "es10c_get_eid.h"
 #include "proc_eim_pkg_retr.h"
 #include "es10b_get_eim_cfg_data.h"
 #include "es10b_add_init_eim.h"
+#include "es10b_get_euicc_info.h"
+#include "ipae_activation.h"
+#include "esipa_get_eim_pkg.h"
+#include "es10b_cfg_immediate_enable.h"
 #include "es10b_euicc_mem_rst.h"
 #include "es10b_load_euicc_pkg.h"
 #include "es10b_immediate_enable.h"
@@ -45,8 +51,8 @@ static void nvstate_free_contents(struct ipa_nvstate *nvstate)
 {
 	/* free dynamically allocated struct members (append code for new members here) */
 	IPA_FREE(nvstate->iot_euicc_emu.eim_cfg_ber);
-	IPA_FREE(nvstate->iot_euicc_emu.auto_enable.smdp_oid);
-	IPA_FREE(nvstate->iot_euicc_emu.auto_enable.smdp_address);
+	IPA_FREE(nvstate->iot_euicc_emu.immediate_enable.smdp_oid);
+	IPA_FREE(nvstate->iot_euicc_emu.immediate_enable.smdp_address);
 }
 
 static void nvstate_reset(struct ipa_nvstate *nvstate)
@@ -54,6 +60,8 @@ static void nvstate_reset(struct ipa_nvstate *nvstate)
 	nvstate_free_contents(nvstate);
 	memset(nvstate, 0, sizeof(*nvstate));
 	nvstate->version = IPA_NVSTATE_VERSION;
+	/* Not the zero value: IPA_STATE_CHANGE_OTHER_EIM is 0, and a fresh state has nothing to report. */
+	nvstate->state_change_cause = IPA_STATE_CHANGE_NONE;
 }
 
 static struct ipa_buf *nvstate_serialize_ipa_buf(struct ipa_buf *nvstate_bin, struct ipa_buf *buf)
@@ -84,17 +92,35 @@ static struct ipa_buf *nvstate_serialize(struct ipa_nvstate *nvstate)
 
 	/* serialize dynamically allocated struct members (append code for new members here) */
 	nvstate_bin = nvstate_serialize_ipa_buf(nvstate_bin, nvstate->iot_euicc_emu.eim_cfg_ber);
-	nvstate_bin = nvstate_serialize_ipa_buf(nvstate_bin, nvstate->iot_euicc_emu.auto_enable.smdp_oid);
-	nvstate_bin = nvstate_serialize_ipa_buf(nvstate_bin, nvstate->iot_euicc_emu.auto_enable.smdp_address);
+	nvstate_bin = nvstate_serialize_ipa_buf(nvstate_bin, nvstate->iot_euicc_emu.immediate_enable.smdp_oid);
+	nvstate_bin = nvstate_serialize_ipa_buf(nvstate_bin, nvstate->iot_euicc_emu.immediate_enable.smdp_address);
 	return nvstate_bin;
 }
 
-struct ipa_buf *nvstate_deserialize_ipa_buf(uint8_t ** nvstate_data, size_t *nvstate_data_len)
+/*! Deserialize one dynamically allocated member from the nvstate image.
+ *  \param[inout] nvstate_data cursor into the image, advanced past the member that was read.
+ *  \param[inout] nvstate_data_len bytes left at the cursor, reduced by the same amount.
+ *  \param[out] malformed set when the image could not be read; left alone otherwise.
+ *  \returns the member, or NULL when it was stored absent or when the image is malformed.
+ *
+ *  NULL alone does not say which of the two happened, because a member that was never set is stored
+ *  as a placeholder and legitimately reads back as NULL. The caller has to consult malformed to tell
+ *  an absent member from an image it should not be loading at all. */
+static struct ipa_buf *nvstate_deserialize_ipa_buf(uint8_t ** nvstate_data, size_t *nvstate_data_len, bool *malformed)
 {
 	struct ipa_buf *buf;
 
 	buf = ipa_buf_deserialize(*nvstate_data, *nvstate_data_len);
+	if (!buf) {
+		/* The image ended early or its length fields contradict each other. Report it and leave
+		 * nothing behind for a further call to walk into. */
+		*malformed = true;
+		*nvstate_data_len = 0;
+		return NULL;
+	}
 
+	/* ipa_buf_deserialize() checked this fits, so neither the advance nor the subtraction runs off
+	 * the end of the image. */
 	*nvstate_data += buf->data_len + sizeof(*buf);
 	*nvstate_data_len -= (buf->data_len + sizeof(*buf));
 
@@ -112,6 +138,8 @@ static void nvstate_deserialize(struct ipa_nvstate *nvstate, struct ipa_buf *nvs
 {
 	uint8_t *nvstate_data;
 	size_t nvstate_data_len;
+	uint32_t version;
+	bool malformed = false;
 
 	/* nothing to deserialize */
 	if (!nvstate_bin) {
@@ -119,35 +147,61 @@ static void nvstate_deserialize(struct ipa_nvstate *nvstate, struct ipa_buf *nvs
 		return;
 	}
 
-	/* A file too short to even hold the fixed part cannot be deserialized:
-	 * the memcpy below would read past the buffer and the length arithmetic
-	 * that follows would underflow.  This is what a power cut in the middle
-	 * of save_nvstate_to_file() leaves behind, so treat it the same as a
-	 * missing file and start from a fresh state. */
+	/* A stored image written by an older build can be shorter than the current struct -- growing a
+	 * statically allocated member is enough. Check the length before the copy, because the version
+	 * field that would reject it lives inside the bytes we are about to read. */
 	if (nvstate_bin->len < sizeof(*nvstate)) {
 		IPA_LOGP(SIPA, LERROR,
-			 "non volatile state is truncated (%zu bytes, expected at least %zu) -- starting over\n",
+			 "cannot deserialize non volatile state, it is %zu bytes but at least %zu are needed\n",
 			 nvstate_bin->len, sizeof(*nvstate));
 		nvstate_reset(nvstate);
 		return;
 	}
 
-	/* deserialize statically allocated struct members and check version */
-	memcpy((uint8_t *) nvstate, nvstate_bin->data, sizeof(*nvstate));
-	nvstate_data = nvstate_bin->data + sizeof(*nvstate);
-	nvstate_data_len = nvstate_bin->len - sizeof(*nvstate);
-	if (nvstate->version != IPA_NVSTATE_VERSION) {
+	/* Read the version on its own, before the wholesale copy below.  The struct holds pointers to
+	 * dynamically allocated members, and nvstate_serialize() writes it out as it stands, so those
+	 * pointer slots in the image hold the writing process's heap addresses.  Copying the struct in
+	 * first and rejecting it afterwards would leave those addresses in place for the
+	 * nvstate_reset() on the rejection path to free -- that is a free() of a value taken from the
+	 * file.  Same reasoning as the length check above: what decides whether the image may be
+	 * trusted has to be read before the image is acted on. */
+	memcpy(&version, nvstate_bin->data + offsetof(struct ipa_nvstate, version), sizeof(version));
+	if (version != IPA_NVSTATE_VERSION) {
 		IPA_LOGP(SIPA, LERROR,
 			 "cannot deserialize non volatile state with mismatching version number %u (expected version: %u)\n",
-			 nvstate->version, IPA_NVSTATE_VERSION);
+			 version, IPA_NVSTATE_VERSION);
 		nvstate_reset(nvstate);
 		return;
 	}
 
+	/* deserialize statically allocated struct members */
+	memcpy((uint8_t *) nvstate, nvstate_bin->data, sizeof(*nvstate));
+	nvstate_data = nvstate_bin->data + sizeof(*nvstate);
+	nvstate_data_len = nvstate_bin->len - sizeof(*nvstate);
+
+	/* The copy above also brought the stale pointers in.  Clear them so that the struct never holds
+	 * a pointer that came from the file: the assignments below overwrite all three, but an early
+	 * return added between here and there must not resurrect the bug this replaced. */
+	nvstate->iot_euicc_emu.eim_cfg_ber = NULL;
+	nvstate->iot_euicc_emu.immediate_enable.smdp_oid = NULL;
+	nvstate->iot_euicc_emu.immediate_enable.smdp_address = NULL;
+
 	/* deserialize dynamically allocated struct members (append code for new members here) */
-	nvstate->iot_euicc_emu.eim_cfg_ber = nvstate_deserialize_ipa_buf(&nvstate_data, &nvstate_data_len);
-	nvstate->iot_euicc_emu.auto_enable.smdp_oid = nvstate_deserialize_ipa_buf(&nvstate_data, &nvstate_data_len);
-	nvstate->iot_euicc_emu.auto_enable.smdp_address = nvstate_deserialize_ipa_buf(&nvstate_data, &nvstate_data_len);
+	nvstate->iot_euicc_emu.eim_cfg_ber =
+	    nvstate_deserialize_ipa_buf(&nvstate_data, &nvstate_data_len, &malformed);
+	nvstate->iot_euicc_emu.immediate_enable.smdp_oid =
+	    nvstate_deserialize_ipa_buf(&nvstate_data, &nvstate_data_len, &malformed);
+	nvstate->iot_euicc_emu.immediate_enable.smdp_address =
+	    nvstate_deserialize_ipa_buf(&nvstate_data, &nvstate_data_len, &malformed);
+
+	/* A truncated or inconsistent image means the members that did come through cannot be trusted
+	 * either -- there is no way to tell a member that was stored absent from one whose bytes went
+	 * missing. Start over rather than run on half a state. */
+	if (malformed) {
+		IPA_LOGP(SIPA, LERROR,
+			 "cannot deserialize non volatile state, the dynamically allocated members do not fit the stored image\n");
+		nvstate_reset(nvstate);
+	}
 }
 
 /*! Read eIM configuration from eUICC and pick a suitable eIM.
@@ -159,7 +213,9 @@ int eim_init(struct ipa_context *ctx)
 	struct EimConfigurationData *eim_cfg_data_item = NULL;
 	long i;
 
-	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx);
+	/* Only the preferred eIM is wanted; when none is configured this asks for the whole list and the
+	 * filter below picks the first entry. */
+	eim_cfg_data = ipa_es10b_get_eim_cfg_data(ctx, ctx->cfg->preferred_eim_id);
 	if (!eim_cfg_data) {
 		IPA_LOGP(SIPA, LERROR, "cannot read EimConfigurationData from eUICC\n");
 		goto error;
@@ -176,12 +232,18 @@ int eim_init(struct ipa_context *ctx)
 	if (!ctx->eim_id)
 		goto error;
 
+	/* eimIdType is OPTIONAL on the wire, so it must be checked before it is dereferenced: a spec compliant
+	 * eUICC assigns eimIdTypeProprietary when the IPA leaves it out, but nothing guarantees that the value
+	 * we read back actually carries it. */
 	if (eim_cfg_data_item->eimFqdn)
 		ctx->eim_fqdn = IPA_STR_FROM_ASN(eim_cfg_data_item->eimFqdn);
-	else if (*eim_cfg_data_item->eimIdType == 2)
+	else if (eim_cfg_data_item->eimIdType && *eim_cfg_data_item->eimIdType == EimIdType_eimIdTypeFqdn)
 		ctx->eim_fqdn = IPA_STR_FROM_ASN(&eim_cfg_data_item->eimId);
-	else
+	else {
+		IPA_LOGP(SIPA, LERROR,
+			 "no eimFqdn in the eIM configuration and the eimId is not an FQDN, cannot reach the eIM!\n");
 		goto error;
+	}
 
 	/* Install the eIM's TLS CA certificate into the HTTP context so that
 	 * HTTPS server certificate verification uses the certificate stored on
@@ -218,16 +280,6 @@ int eim_init(struct ipa_context *ctx)
 				 "no trustedPublicKeyDataTls in EimConfigurationData; "
 				 "HTTPS server verification uses cabundle\n");
 		}
-		/* TODO: install eUICC client certificate for mutual TLS once
-		 * an ES10b-backed or PC/SC-APDU signing function is available:
-		 *
-		 *   ipa_http_set_client_cert_der(ctx->http_ctx,
-		 *       euicc_cert_der, euicc_cert_len,
-		 *       euicc_tls_sign, ctx);
-		 *
-		 * euicc_tls_sign() would obtain the eUICC certificate from
-		 * ipa_es10b_get_certs() and delegate ECDSA signing to the chip
-		 * via a COMPUTE DIGITAL SIGNATURE APDU or equivalent. */
 		break;
 	}
 
@@ -250,6 +302,9 @@ struct ipa_context *ipa_new_ctx(struct ipa_config *cfg, struct ipa_buf *nvstate)
 	assert(ctx);
 
 	ctx->cfg = cfg;
+	/* Not the zero value: IPA_MODE_IPAD is 0, and nothing has been established yet. The mode only
+	 * settles once TERMINAL CAPABILITY has told the eUICC which IPA the device supports. */
+	ctx->ipa_mode = IPA_MODE_UNKNOWN;
 	nvstate_deserialize(&ctx->nvstate, nvstate);
 
 	return ctx;
@@ -261,6 +316,37 @@ struct ipa_context *ipa_new_ctx(struct ipa_config *cfg, struct ipa_buf *nvstate)
 int ipa_init(struct ipa_context *ctx)
 {
 	int rc;
+
+	/* Refuse rather than quietly ignore: a caller that asks for the emulation is telling us it has a consumer
+	 * eUICC in the reader, and carrying on against it as if it were an IoT eUICC would fail later in ways that
+	 * are much harder to read than this. */
+#ifndef IPA_HAVE_IOT_EUICC_EMULATION
+	if (ctx->cfg->iot_euicc_emu_enabled) {
+		IPA_LOGP(SIPA, LERROR,
+			 "IoT eUICC emulation was requested, but this build does not have it "
+			 "(rebuild with -DIOT_EUICC_EMULATION=ON)\n");
+		return -EINVAL;
+	}
+#endif
+
+	/* Likewise for the wire binding: better to say so here than to have every ESipa call fail the same way. */
+#ifndef IPA_HAVE_ESIPA_ASN1
+	if (ctx->cfg->esipa_binding == IPA_ESIPA_BINDING_ASN1) {
+		IPA_LOGP(SIPA, LERROR,
+			 "the ASN.1 ESipa binding was selected, but this build does not have it "
+			 "(set ipa_config.esipa_binding to IPA_ESIPA_BINDING_JSON, or rebuild with "
+			 "-DESIPA_BINDING_ASN1=ON)\n");
+		return -EINVAL;
+	}
+#endif
+#ifndef IPA_HAVE_ESIPA_JSON
+	if (ctx->cfg->esipa_binding == IPA_ESIPA_BINDING_JSON) {
+		IPA_LOGP(SIPA, LERROR,
+			 "the JSON ESipa binding was selected, but this build does not have it "
+			 "(rebuild with -DESIPA_BINDING_JSON=ON)\n");
+		return -EINVAL;
+	}
+#endif
 
 	ctx->http_ctx = ipa_http_init(ctx->cfg->eim_cabundle, ctx->cfg->eim_disable_ssl_verif);
 	if (!ctx->http_ctx)
@@ -313,30 +399,43 @@ int ipa_add_init_eim_cfg(struct ipa_context *ctx, struct ipa_buf *cfg)
 		return -EINVAL;
 	}
 
+	/* An initial configuration may only *request* an association token, by setting it to -1 (SGP.32,
+	 * section 5.9.4). The remaining checks are done by ipa_es10b_add_init_eim() itself, for both the real
+	 * eUICC and the emulation. */
+	if (ipa_es10b_add_init_eim_check_assoc_tokens(eim_cfg_decoded)) {
+		IPA_LOGP(SIPA, LERROR, "refusing the initial eIM configuration\n");
+		ASN_STRUCT_FREE(asn_DEF_AddInitialEimRequest, eim_cfg_decoded);
+		return -EINVAL;
+	}
+
 	/* Call ES10b function AddInitialEim */
 	add_init_eim_req.req = *eim_cfg_decoded;
 	add_init_eim_res = ipa_es10b_add_init_eim(ctx, &add_init_eim_req);
+
+	if (!add_init_eim_res || add_init_eim_res->add_init_eim_err) {
+		IPA_LOGP(SIPA, LERROR, "the initial eIM configuration was not accepted\n");
+		ipa_es10b_add_init_eim_res_free(add_init_eim_res);
+		ASN_STRUCT_FREE(asn_DEF_AddInitialEimRequest, eim_cfg_decoded);
+		return -EINVAL;
+	}
 
 	ipa_es10b_add_init_eim_res_free(add_init_eim_res);
 	ASN_STRUCT_FREE(asn_DEF_AddInitialEimRequest, eim_cfg_decoded);
 	return 0;
 }
 
-/*! reset memory of the eUICC (eUICCMemoryReset).
- *  \param[inout] ctx pointer to ipa_context.
- *  \param[inout] operatnl_profiles apply reset option "deleteOperationalProfiles".
- *  \param[inout] test_profiles apply reset option "deleteFieldLoadedTestProfiles".
- *  \param[inout] default_smdp_addr apply reset option "resetDefaultSmdpAddress".
- *  \returns 0 on success, negative on error. */
-int ipa_euicc_mem_rst(struct ipa_context *ctx, bool operatnl_profiles, bool test_profiles, bool default_smdp_addr,
-		      bool eim_cfg_data, bool auto_enable_cfg)
+/*! reset memory of the eUICC (eUICCMemoryReset). See ipa_euicc_mem_rst() in ipad.h. */
+int ipa_euicc_mem_rst(struct ipa_context *ctx, uint32_t options)
 {
-	struct ipa_es10b_euicc_mem_rst euicc_mem_rst = { 0 };
-	euicc_mem_rst.operatnl_profiles = operatnl_profiles;
-	euicc_mem_rst.test_profiles = test_profiles;
-	euicc_mem_rst.default_smdp_addr = default_smdp_addr;
-	euicc_mem_rst.eim_cfg_data = eim_cfg_data;
-	euicc_mem_rst.auto_enable_cfg = auto_enable_cfg;
+	struct ipa_es10b_euicc_mem_rst euicc_mem_rst = {
+		.operatnl_profiles = !!(options & IPA_EUICC_MEM_RST_OPERATIONAL_PROFILES),
+		.test_profiles = !!(options & IPA_EUICC_MEM_RST_FIELD_LOADED_TEST_PROFILES),
+		.default_smdp_addr = !!(options & IPA_EUICC_MEM_RST_DEFAULT_SMDP_ADDR),
+		.pre_loaded_test_profiles = !!(options & IPA_EUICC_MEM_RST_PRE_LOADED_TEST_PROFILES),
+		.provisioning_profiles = !!(options & IPA_EUICC_MEM_RST_PROVISIONING_PROFILES),
+		.eim_cfg_data = !!(options & IPA_EUICC_MEM_RST_EIM_CFG_DATA),
+		.immediate_enable_cfg = !!(options & IPA_EUICC_MEM_RST_IMMEDIATE_ENABLE_CFG),
+	};
 	return ipa_es10b_euicc_mem_rst(ctx, &euicc_mem_rst);
 }
 
@@ -345,6 +444,31 @@ int ipa_euicc_mem_rst(struct ipa_context *ctx, bool operatnl_profiles, bool test
  * contract).  These are thin, synchronous pass-throughs to the ES10b layer;
  * the host decides when to invoke them.
  * --------------------------------------------------------------------------- */
+
+/*! Report what the eUICC supports.  See ipa_get_euicc_caps() in ipad.h. */
+int ipa_get_euicc_caps(struct ipa_context *ctx, struct ipa_euicc_caps *caps)
+{
+	return ipa_es10b_get_euicc_caps(ctx, caps);
+}
+
+/*! Activate the eUICC's own IPAe.  See ipa_activate_ipae() in ipad.h. */
+int ipa_activate_ipae(struct ipa_context *ctx)
+{
+	return ipa_ipae_activation(ctx);
+}
+
+/*! Record the last registered PLMN.  See ipa_set_rplmn() in ipad.h. */
+int ipa_set_rplmn(struct ipa_context *ctx, const char *mcc, const char *mnc)
+{
+	return ipa_esipa_set_rplmn(ctx, mcc, mnc);
+}
+
+/*! ES10b ConfigureImmediateProfileEnabling.  See ipa_cfg_immediate_enable() in ipad.h. */
+int ipa_cfg_immediate_enable(struct ipa_context *ctx, bool immediate_enable, const char *smdp_oid,
+			     const char *smdp_address)
+{
+	return ipa_es10b_cfg_immediate_enable(ctx, immediate_enable, smdp_oid, smdp_address);
+}
 
 /*! ES10b ImmediateEnable.  See ipa_immediate_enable() in ipad.h. */
 int ipa_immediate_enable(struct ipa_context *ctx, bool refresh_flag)
@@ -356,6 +480,38 @@ int ipa_immediate_enable(struct ipa_context *ctx, bool refresh_flag)
 int ipa_execute_fallback(struct ipa_context *ctx, bool refresh_flag)
 {
 	return ipa_es10b_execute_fallback(ctx, refresh_flag);
+}
+
+/*! Which Profile is the Fallback Profile?  See ipa_get_fallback_profile() in ipad.h. */
+int ipa_get_fallback_profile(struct ipa_context *ctx, uint8_t *iccid)
+{
+	struct ipa_es10c_get_prfle_info_res *res;
+	const struct SGP32_ProfileInfo *prfle;
+	int rc = -ENOENT;
+
+	if (!ctx || !iccid)
+		return -EINVAL;
+
+	res = ipa_es10c_get_prfle_info(ctx, NULL);
+	if (!res || res->prfle_info_list_err) {
+		ipa_es10c_get_prfle_info_res_free(res);
+		return -EIO;
+	}
+
+	/* The Profile Metadata is the eUICC's own answer, so it wins wherever it exists.  Only when the
+	 * eUICC cannot hold the flag does the emulation's record stand in -- and then it is the only
+	 * record there is, which is why the two can never disagree. */
+	prfle = ipa_es10c_fallback_prfle(res);
+	if (prfle && prfle->iccid && prfle->iccid->size == IPA_LEN_ICCID) {
+		memcpy(iccid, prfle->iccid->buf, IPA_LEN_ICCID);
+		rc = 0;
+	} else if (IPA_EMU_FALLBACK_SET(ctx)) {
+		memcpy(iccid, ctx->nvstate.iot_euicc_emu.fallback_iccid, IPA_LEN_ICCID);
+		rc = 0;
+	}
+
+	ipa_es10c_get_prfle_info_res_free(res);
+	return rc;
 }
 
 /*! ES10b ReturnFromFallback.  See ipa_return_from_fallback() in ipad.h. */
@@ -436,7 +592,33 @@ int ipa_poll(struct ipa_context *ctx)
 	ctx->check_http = false;
 
 	if (ctx->proc_eucc_pkg_dwnld_exec_res) {
-		/* There is an eUICC package execution ongoing, which we have to finish first */
+		/* There is an eUICC package execution ongoing, which we have to finish first.
+		 *
+		 * Reaching this point means that the previous ipa_poll returned
+		 * IPA_POLL_AGAIN_WHEN_ONLINE, which is only the case when the eUICC package (or a
+		 * subsequent profile rollback) has changed the active profile. An eUICC in that
+		 * state may refuse every further ES10b command with SW=6985 until it is reset, so
+		 * the remaining steps of the procedure (ES10b.RetrieveNotificationsList and the
+		 * removal of the delivered notifications) would fail and the EuiccPackageResult
+		 * would never reach the eIM.
+		 *
+		 * The reset is done here, and not on the proactive REFRESH path in euicc.c, because
+		 * not every eUICC asks for it: some raise a REFRESH with the "UICC Reset" qualifier,
+		 * others require the reset without signalling anything at all. The condition used
+		 * here comes from the package contents instead of from card behaviour, so it holds
+		 * for both. Resetting an eUICC that has already reset itself is harmless. */
+		rc = ipa_euicc_reset_es10x(ctx);
+		if (rc < 0) {
+			/* Without a usable ES10x link the procedure cannot be completed. The
+			 * EuiccPackageResult stays pending as a notification on the eUICC and will be
+			 * delivered by ipa_notif_delivery() once the link is working again. */
+			IPA_LOGP(SIPA, LERROR,
+				 "unable to reset the eUICC after a profile change, eUICC package execution aborted!\n");
+			ipa_proc_eucc_pkg_dwnld_exec_res_free(ctx->proc_eucc_pkg_dwnld_exec_res);
+			ctx->proc_eucc_pkg_dwnld_exec_res = NULL;
+			return check_canaries(ctx);
+		}
+
 		rc = ipa_proc_eucc_pkg_dwnld_exec_onset(ctx, ctx->proc_eucc_pkg_dwnld_exec_res);
 		if (rc < 0) {
 			/* ipa_proc_eucc_pkg_dwnld_exec_onset indicates an error that can not be recovered from. */
@@ -498,12 +680,13 @@ struct ipa_buf *ipa_free_ctx(struct ipa_context *ctx)
 	nvstate = nvstate_serialize(&ctx->nvstate);
 
 	IPA_FREE(ctx->iot_euicc_emu.rollback_iccid);
-	ipa_buf_free(ctx->iot_euicc_emu.auto_enable.smdp_oid);
-	ipa_buf_free(ctx->iot_euicc_emu.auto_enable.smdp_address);
-	ipa_buf_free(ctx->iot_euicc_emu.auto_enable.profile_aid);
+	ipa_buf_free(ctx->iot_euicc_emu.immediate_enable.smdp_oid);
+	ipa_buf_free(ctx->iot_euicc_emu.immediate_enable.smdp_address);
+	ipa_buf_free(ctx->iot_euicc_emu.immediate_enable.profile_aid);
 	IPA_FREE(ctx->eim_id);
 	IPA_FREE(ctx->eim_fqdn);
 	ipa_proc_eucc_pkg_dwnld_exec_res_free(ctx->proc_eucc_pkg_dwnld_exec_res);
+	IPA_FREE(ctx->euicc_caps.iot_version);
 
 	if (ctx->scard_ctx)
 		ipa_euicc_close_es10x(ctx);

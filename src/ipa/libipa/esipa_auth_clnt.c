@@ -42,17 +42,44 @@
 #include "esipa_json.h"
 #include "esipa_auth_clnt.h"
 
+/* The error codes of ESipa.AuthenticateClient (SGP.32, section 6.3.2.2), which are those of
+ * ES9+'.AuthenticateClient plus pprNotAllowed(50) from section 5.14.3.  Not to be confused with
+ * AuthenticateErrorCode, the unrelated ES10b.AuthenticateServer set used in es10b_auth_serv.c: the two
+ * overlap numerically but name entirely different failures. */
+#define AC_ERR(name) \
+	{ AuthenticateClientResponseEsipa__authenticateClientErrorEsipa_##name, #name }
 static const struct num_str_map error_code_strings[] = {
-	{ AuthenticateErrorCode_invalidCertificate, "invalidCertificate" },
-	{ AuthenticateErrorCode_invalidSignature, "invalidSignature" },
-	{ AuthenticateErrorCode_unsupportedCurve, "unsupportedCurve" },
-	{ AuthenticateErrorCode_noSessionContext, "noSessionContext" },
-	{ AuthenticateErrorCode_invalidOid, "invalidOid" },
-	{ AuthenticateErrorCode_euiccChallengeMismatch, "euiccChallengeMismatch" },
-	{ AuthenticateErrorCode_ciPKUnknown, "ciPKUnknown" },
-	{ AuthenticateErrorCode_undefinedError, "undefinedError" },
+	AC_ERR(eumCertificateInvalid),
+	AC_ERR(eumCertificateExpired),
+	AC_ERR(euiccCertificateInvalid),
+	AC_ERR(euiccCertificateExpired),
+	AC_ERR(euiccSignatureInvalid),
+	AC_ERR(matchingIdRefused),
+	AC_ERR(eidMismatch),
+	AC_ERR(noEligibleProfile),
+	AC_ERR(ciPKUnknown),
+	AC_ERR(invalidTransactionId),
+	AC_ERR(insufficientMemory),
+	/* NEW in v1.2: 5.14.3 — status code 8.2.8 "PPR - Not Allowed" maps onto this. */
+	AC_ERR(pprNotAllowed),
+	AC_ERR(eventIdUnknown),
+	AC_ERR(undefinedError),
 	{ 0, NULL }
 };
+#undef AC_ERR
+
+/*! Name of an ESipa.AuthenticateClient error code, for log messages.
+ *  \param[in] err the error code as decoded from the eIM response.
+ *  \returns the code's name from the ASN.1 definition (section 6.3.2.2), or "(unknown)".
+ *
+ *  Shared by both wire bindings on purpose: the JSON binding carries the same codes, and the two
+ *  must not describe one code by two different names. */
+const char *ipa_esipa_auth_clnt_err_str(long err)
+{
+	return ipa_str_from_num(error_code_strings, err, "(unknown)");
+}
+
+#ifdef IPA_HAVE_ESIPA_ASN1		/* ESipa ASN.1 binding, SGP.32 section 6.3 */
 
 static struct ipa_buf *enc_auth_clnt_req(const struct ipa_esipa_auth_clnt_req *req)
 {
@@ -178,7 +205,13 @@ static void *dec_auth_clnt_res(const struct ipa_buf *msg_to_ipa_encoded, const v
 	case AuthenticateClientResponseEsipa_PR_authenticateClientOkDPEsipa:
 		res->auth_clnt_ok_dpe =
 		    &msg_to_ipa->choice.authenticateClientResponseEsipa.choice.authenticateClientOkDPEsipa;
-		res->transaction_id = res->auth_clnt_ok_dpe->transactionId;
+		/* SGP.32 section 5.14.3: transactionId is OPTIONAL here because it is also carried inside
+		 * smdpSigned2, and the eIM SHALL NOT send it to an IPA with IPA Capability minimizeEsipaBytes.
+		 * Fall back to the signed copy when the explicit field is absent, so that the session still has a
+		 * transaction ID and the check below still runs -- an omitted field must not become a way around
+		 * it. Both alternatives live in the decoded message, so neither outlives the response. */
+		res->transaction_id = res->auth_clnt_ok_dpe->transactionId ?
+		    res->auth_clnt_ok_dpe->transactionId : &res->auth_clnt_ok_dpe->smdpSigned2.transactionId;
 		if (!IPA_ASN_STR_CMP(res->transaction_id, &req->req.transactionId)) {
 			IPA_LOGP_ESIPA("AuthenticateClient", LERROR,
 				       "eIM responded with unexpected transaction ID (expected: %s, got: %s)\n",
@@ -219,6 +252,9 @@ static struct ipa_buf *enc_auth_clnt_req_cb(struct ipa_context *ctx, const void 
 	return enc_auth_clnt_req(req);
 }
 
+#endif /* IPA_HAVE_ESIPA_ASN1 */
+
+#ifdef IPA_HAVE_ESIPA_JSON		/* ESipa JSON binding, SGP.32 section 6.4 */
 static struct ipa_buf *json_enc_auth_clnt_req(struct ipa_context *ctx, const void *req)
 {
 	(void)ctx;
@@ -230,6 +266,8 @@ static void *json_dec_auth_clnt_res(const struct ipa_buf *res, const void *req)
 	return ipa_esipa_json_dec_auth_clnt_res(res, req);
 }
 
+#endif /* IPA_HAVE_ESIPA_JSON */
+
 /*! Function: (Esipa) AuthenticateClient.
  *  \param[inout] ctx pointer to ipa_context.
  *  \param[in] req pointer to struct that holds the function parameters.
@@ -239,13 +277,24 @@ struct ipa_esipa_auth_clnt_res *ipa_esipa_auth_clnt(struct ipa_context *ctx, con
 	IPA_LOGP_ESIPA("AuthenticateClient", LINFO, "Requesting client authentication\n");
 
 	return ipa_esipa_call(ctx, "AuthenticateClient", req,
-			      enc_auth_clnt_req_cb, dec_auth_clnt_res,
-			      json_enc_auth_clnt_req, json_dec_auth_clnt_res);
+			      IPA_ESIPA_ASN1_CB(enc_auth_clnt_req_cb, dec_auth_clnt_res),
+			      IPA_ESIPA_JSON_CB(json_enc_auth_clnt_req, json_dec_auth_clnt_res));
 }
 
 /*! Free results of function: (Esipa) AuthenticateClient.
  *  \param[in] res pointer to function result. */
 void ipa_esipa_auth_clnt_res_free(struct ipa_esipa_auth_clnt_res *res)
 {
+	/* The two bindings own their result members differently, and IPA_ESIPA_RES_FREE only knows the
+	 * ASN.1 model: there every member points into msg_to_ipa, so freeing that one tree frees
+	 * everything.  The JSON decoders allocate their members instead and leave msg_to_ipa NULL, which
+	 * is what distinguishes the two at run time -- both bindings are compiled in and the choice is
+	 * ctx->cfg->esipa_binding.  This is the "caller must free those first" case the macro's own
+	 * comment describes.
+	 */
+	if (res && !res->msg_to_ipa) {
+		ASN_STRUCT_FREE(asn_DEF_AuthenticateClientOkDPEsipa, res->auth_clnt_ok_dpe);
+		ASN_STRUCT_FREE(asn_DEF_AuthenticateClientOkDSEsipa, res->auth_clnt_ok_dse);
+	}
 	IPA_ESIPA_RES_FREE(res);
 }

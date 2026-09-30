@@ -43,16 +43,91 @@ bool prfle_inst_consent(char *sm_dp_plus_address, char *ac_token)
 	return false;
 }
 
+/* Print every subsystem and level name the -l and -d options accept. The names come from libipa rather than from a
+ * list kept here, so that adding a subsystem does not silently leave the help text (or the parser) behind. */
+static void print_log_names(void)
+{
+	unsigned int i;
+
+	fprintf(stderr, "subsystems:");
+	for (i = 0; i < _NUM_LOG_SUBSYS; i++)
+		fprintf(stderr, " %s", ipa_log_subsys_name(i));
+	fprintf(stderr, "\nlevels:");
+	for (i = 0; i < _NUM_LOG_LEVEL; i++)
+		fprintf(stderr, " %s", ipa_log_level_name(i));
+	fprintf(stderr, "\n");
+}
+
+/*! Parse the argument of -l (a level, applying to every subsystem) or -d (SUBSYS:LEVEL, applying to one).
+ *  \param[in] arg option argument.
+ *  \param[in] per_subsys true when arg carries a subsystem prefix, i.e. the option was -d.
+ *  \returns 0 on success, -EINVAL when a name is not recognised or the syntax is wrong. */
+static int parse_log_level_opt(const char *arg, bool per_subsys)
+{
+	char buf[32];
+	char *sep;
+	int subsys;
+	int level;
+
+	if (!per_subsys) {
+		level = ipa_log_level_by_name(arg);
+		if (level < 0) {
+			fprintf(stderr, "unknown log level \"%s\"\n", arg);
+			print_log_names();
+			return -EINVAL;
+		}
+		ipa_log_set_level_all(level);
+		return 0;
+	}
+
+	/* Split SUBSYS:LEVEL in a scratch copy: optarg points into argv, which is not ours to modify. */
+	if (strlen(arg) >= sizeof(buf)) {
+		fprintf(stderr, "log level specification \"%s\" is too long\n", arg);
+		return -EINVAL;
+	}
+	strcpy(buf, arg);
+
+	sep = strchr(buf, ':');
+	if (!sep) {
+		fprintf(stderr, "log level specification \"%s\" is not of the form SUBSYS:LEVEL\n", arg);
+		print_log_names();
+		return -EINVAL;
+	}
+	*sep = '\0';
+
+	subsys = ipa_log_subsys_by_name(buf);
+	if (subsys < 0) {
+		fprintf(stderr, "unknown log subsystem \"%s\"\n", buf);
+		print_log_names();
+		return -EINVAL;
+	}
+
+	level = ipa_log_level_by_name(sep + 1);
+	if (level < 0) {
+		fprintf(stderr, "unknown log level \"%s\"\n", sep + 1);
+		print_log_names();
+		return -EINVAL;
+	}
+
+	ipa_log_set_level(subsys, level);
+	return 0;
+}
+
 static void print_help(void)
 {
 	printf("options:\n");
 	printf(" -h .................. print this text.\n");
 	printf(" -t TAC .............. set TAC (default: %s)\n", DEFAULT_TAC);
+	printf(" -M IMEI ............. set IMEI, %d hex digits (default: not sent, it is optional)\n",
+	       IPA_LEN_IMEI * 2);
 	printf(" -e eimId ............ set preferred eIM (in case the eUICC has multiple)\n");
 	printf(" -r N ................ set reader number (default: %d)\n", DEFAULT_READER_NUMBER);
 	printf(" -c N ................ set logical channel number (default: %d)\n", DEFAULT_CHANNEL_NUMBER);
 	printf(" -f PATH ............. set initial eIM configuration\n");
-	printf(" -m .................. reset eUICC memory\n");
+	printf(" -m .................. reset eUICC memory (everything except Provisioning Profiles)\n");
+	printf(" -p .................. delete the Provisioning Profiles -- these carry the bootstrap\n");
+	printf("                       connectivity used to reach the eIM, so on a deployed device this\n");
+	printf("                       may remove the only way back in. Combines with -m.\n");
 	printf(" -n PATH ............. path to nvstate file (default: %s)\n", DEFAULT_NVSTATE_PATH);
 	printf(" -y NUM .............. number of retries for ESipa requests (default: %u)\n",
 	       DEFAULT_ESIPA_REQ_RETRIES);
@@ -60,9 +135,27 @@ static void print_help(void)
 	printf(" -C .................. CA (Certificate Authority) Bundle file\n");
 	printf(" -S .................. disable HTTPS\n");
 	printf(" -I .................. disable SSL certificate verification (insecure)\n");
+	printf(" -L .................. prefix each log line with the source file and line that produced it\n");
+	printf(" -l LEVEL ............ set the log level of every subsystem (default: %s)\n",
+	       ipa_log_level_name(LDEBUG));
+	printf(" -d SUBSYS:LEVEL ..... set the log level of one subsystem, may be given more than once\n");
+	printf("                       (applied in the order given, so -l %s -d %s:%s works as it reads)\n",
+	       ipa_log_level_name(LERROR), ipa_log_subsys_name(SESIPA), ipa_log_level_name(LDEBUG));
+	printf("                       subsystems:");
+	for (unsigned int i = 0; i < _NUM_LOG_SUBSYS; i++)
+		printf(" %s", ipa_log_subsys_name(i));
+	printf("\n                       levels:");
+	for (unsigned int i = 0; i < _NUM_LOG_LEVEL; i++)
+		printf(" %s", ipa_log_level_name(i));
+	printf("\n");
+#ifdef IPA_HAVE_IOT_EUICC_EMULATION
 	printf(" -E .................. emulate IoT eUICC (compatibility mode to use consumer eUICCs)\n");
+#endif
+#if defined(IPA_HAVE_ESIPA_JSON) && defined(IPA_HAVE_ESIPA_ASN1)
+	printf(" -j .................. use the JSON ESipa binding (default: ASN.1)\n");
+#endif
 	printf(" -1 .................. force the IPAd to process only one eUICC package (debug, use with caution)\n");
-	printf(" -j PATH ............. run from a JSON configuration file (all other options are ignored)\n");
+	printf(" -J PATH ............. run from a JSON configuration file (all other options are ignored)\n");
 	printf("\n");
 	printf(" ES10b triggers (one-shot; run once against the eUICC, then exit --\n");
 	printf(" a real device daemon calls the matching ipa_* API from onomondo/ipad.h):\n");
@@ -74,6 +167,15 @@ static void print_help(void)
 	printf(" -x .................. DisableEmergencyProfile\n");
 	printf(" -G .................. GetConnectivityParameters (print httpParams)\n");
 	printf(" -D FQDN ............. SetDefaultDpAddress to the given SM-DP+ FQDN\n");
+	printf(" -P OID .............. ConfigureImmediateProfileEnabling: activate immediate Profile\n");
+	printf("                       enabling with the given default SM-DP+ OID (dotted decimal).\n");
+	printf("                       Combine with -D to set the default SM-DP+ FQDN in the same call.\n");
+	printf("                       The eUICC refuses this once it has eIM configuration data.\n");
+	printf("\n");
+	printf(" -A .................. activate the eUICC's own IPAe (SGP.32 3.8.4). This hands the eUICC\n");
+	printf("                       over: IPAe and IPAd are mutually exclusive, so afterwards this\n");
+	printf("                       program is no longer the active IPA. Getting back needs an eUICC\n");
+	printf("                       reset and a new TERMINAL CAPABILITY, i.e. another run.\n");
 }
 
 struct ipa_buf *load_ber_from_file(char *dir, char *file)
@@ -131,7 +233,7 @@ void save_nvstate_to_file(char *path, struct ipa_buf *nvstate)
 static void sig_usr1(int signum)
 {
 	running = false;
-	/* Also stops a poll loop started via -j (ipa_run_from_config). */
+	/* Also stops a poll loop started via -J (ipa_run_from_config). */
 	ipa_run_stop();
 }
 
@@ -147,18 +249,27 @@ enum getopt_action {
 	ACTION_DISABLE_EMERGENCY,
 	ACTION_GET_CONN_PARAMS,
 	ACTION_SET_DEFAULT_DP,
+	ACTION_ACTIVATE_IPAE,
+	ACTION_CFG_IMMEDIATE_ENABLE,
 };
 
 /* Run a single ES10b trigger action against the eUICC and report the outcome.
  * Returns the negative transport error, or 0 once the command was delivered
  * (the eUICC's own status code, ok or not, is logged). */
-static int run_es10b_trigger(struct ipa_context *ctx, enum getopt_action action, const char *default_dp, bool refresh)
+static int run_es10b_trigger(struct ipa_context *ctx, enum getopt_action action, const char *default_dp,
+			     const char *cfg_ie_oid, bool refresh)
 {
 	int rc = 0;
 
 	switch (action) {
 	case ACTION_IMMEDIATE_ENABLE:
 		rc = ipa_immediate_enable(ctx, refresh);
+		break;
+	case ACTION_ACTIVATE_IPAE:
+		rc = ipa_activate_ipae(ctx);
+		break;
+	case ACTION_CFG_IMMEDIATE_ENABLE:
+		rc = ipa_cfg_immediate_enable(ctx, true, cfg_ie_oid, default_dp);
 		break;
 	case ACTION_EXECUTE_FALLBACK:
 		rc = ipa_execute_fallback(ctx, refresh);
@@ -211,7 +322,7 @@ int main(int argc, char **argv)
 	int opt;
 	int rc;
 	char *getopt_initial_eim_cfg_file = NULL;
-	bool getopt_euicc_memory_reset = false;
+	uint32_t getopt_euicc_memory_reset = 0;
 	char *getopt_nvstate_path = DEFAULT_NVSTATE_PATH;
 	struct ipa_buf *nvstate_load = NULL;
 	struct ipa_buf *nvstate_save = NULL;
@@ -219,6 +330,8 @@ int main(int argc, char **argv)
 	enum getopt_action getopt_action = ACTION_NONE;
 	char *getopt_default_dp = NULL;
 	char *getopt_config_path = NULL;
+	char *getopt_cfg_ie_oid = NULL;
+	uint8_t getopt_imei[IPA_LEN_IMEI];
 
 	signal(SIGUSR1, sig_usr1);
 
@@ -229,10 +342,17 @@ int main(int argc, char **argv)
 	cfg.euicc_channel = DEFAULT_CHANNEL_NUMBER;
 	ipa_binary_from_hexstr(cfg.tac, sizeof(cfg.tac), DEFAULT_TAC);
 	cfg.esipa_req_retries = DEFAULT_ESIPA_REQ_RETRIES;
+	/* ASN.1 is the default binding and also the zero value of the enum, but a build may not have it -- then
+	 * there is only one binding to pick and no reason to make the operator pick it. */
+#ifdef IPA_HAVE_ESIPA_ASN1
+	cfg.esipa_binding = IPA_ESIPA_BINDING_ASN1;
+#else
+	cfg.esipa_binding = IPA_ESIPA_BINDING_JSON;
+#endif
 
 	/* Overwrite configuration values with user defined parameters */
 	while (1) {
-		opt = getopt(argc, argv, "ht:e:r:c:f:mn:C:SIEy:a1RiFbXxGD:j:");
+		opt = getopt(argc, argv, "ht:M:e:r:c:f:mpn:C:SIEjJ:Ll:d:y:a1RiFbXxGD:AP:");
 		if (opt == -1)
 			break;
 
@@ -243,6 +363,31 @@ int main(int argc, char **argv)
 			break;
 		case 't':
 			ipa_binary_from_hexstr(cfg.tac, sizeof(cfg.tac), optarg);
+			break;
+		case 'j':
+#ifndef IPA_HAVE_ESIPA_JSON
+			fprintf(stderr, "-j: this build has no ESipa JSON binding "
+					"(rebuild with -DESIPA_BINDING_JSON=ON)\n");
+			exit(1);
+#endif
+			cfg.esipa_binding = IPA_ESIPA_BINDING_JSON;
+			break;
+		case 'L':
+			ipa_log_set_print_source(true);
+			break;
+		case 'l':
+		case 'd':
+			if (parse_log_level_opt(optarg, opt == 'd') < 0)
+				exit(1);
+			break;
+		case 'M':
+			if (strlen(optarg) != IPA_LEN_IMEI * 2) {
+				IPA_LOGP(SMAIN, LERROR, "-M expects %d hex digits (IMEI as Octet8)\n",
+					 IPA_LEN_IMEI * 2);
+				return -EINVAL;
+			}
+			ipa_binary_from_hexstr(getopt_imei, sizeof(getopt_imei), optarg);
+			cfg.imei = getopt_imei;
 			break;
 		case 'e':
 			cfg.preferred_eim_id = optarg;
@@ -257,7 +402,15 @@ int main(int argc, char **argv)
 			getopt_initial_eim_cfg_file = optarg;
 			break;
 		case 'm':
-			getopt_euicc_memory_reset = true;
+			/* Deliberately without IPA_EUICC_MEM_RST_PROVISIONING_PROFILES: a blanket reset must not
+			 * take the bootstrap connectivity with it. Ask for that separately with -p. */
+			getopt_euicc_memory_reset |= IPA_EUICC_MEM_RST_OPERATIONAL_PROFILES |
+			    IPA_EUICC_MEM_RST_FIELD_LOADED_TEST_PROFILES |
+			    IPA_EUICC_MEM_RST_PRE_LOADED_TEST_PROFILES | IPA_EUICC_MEM_RST_DEFAULT_SMDP_ADDR |
+			    IPA_EUICC_MEM_RST_EIM_CFG_DATA | IPA_EUICC_MEM_RST_IMMEDIATE_ENABLE_CFG;
+			break;
+		case 'p':
+			getopt_euicc_memory_reset |= IPA_EUICC_MEM_RST_PROVISIONING_PROFILES;
 			break;
 		case 'n':
 			getopt_nvstate_path = optarg;
@@ -272,6 +425,11 @@ int main(int argc, char **argv)
 			cfg.eim_disable_ssl_verif = true;
 			break;
 		case 'E':
+#ifndef IPA_HAVE_IOT_EUICC_EMULATION
+			fprintf(stderr, "-E: this build has no IoT eUICC emulation "
+					"(rebuild with -DIOT_EUICC_EMULATION=ON)\n");
+			exit(1);
+#endif
 			cfg.iot_euicc_emu_enabled = true;
 			break;
 		case 'y':
@@ -285,6 +443,13 @@ int main(int argc, char **argv)
 			break;
 		case 'R':
 			cfg.refresh_flag = true;
+			break;
+		case 'P':
+			getopt_cfg_ie_oid = optarg;
+			getopt_action = ACTION_CFG_IMMEDIATE_ENABLE;
+			break;
+		case 'A':
+			getopt_action = ACTION_ACTIVATE_IPAE;
 			break;
 		case 'i':
 			getopt_action = ACTION_IMMEDIATE_ENABLE;
@@ -305,10 +470,13 @@ int main(int argc, char **argv)
 			getopt_action = ACTION_GET_CONN_PARAMS;
 			break;
 		case 'D':
-			getopt_action = ACTION_SET_DEFAULT_DP;
 			getopt_default_dp = optarg;
+			/* -D carries the FQDN for -P as well as being a trigger of its own. Let -P keep the
+			 * action so that the two work together whichever order they are given in. */
+			if (getopt_action != ACTION_CFG_IMMEDIATE_ENABLE)
+				getopt_action = ACTION_SET_DEFAULT_DP;
 			break;
-		case 'j':
+		case 'J':
 			getopt_config_path = optarg;
 			break;
 		default:
@@ -335,6 +503,8 @@ int main(int argc, char **argv)
 	printf(" eim_disable_ssl = %d\n", cfg.eim_disable_ssl);
 	printf(" eim_disable_ssl_verif = %d\n", cfg.eim_disable_ssl_verif);
 	printf(" tac = %s\n", ipa_hexdump(cfg.tac, sizeof(cfg.tac)));
+	if (cfg.imei)
+		printf(" imei = %s\n", ipa_hexdump(cfg.imei, IPA_LEN_IMEI));
 	printf(" iot_euicc_emu_enabled = %u\n", cfg.iot_euicc_emu_enabled);
 	printf(" esipa_req_retries = %u\n", cfg.esipa_req_retries);
 	printf(" refresh_flag = %u\n", cfg.refresh_flag);
@@ -379,11 +549,11 @@ int main(int argc, char **argv)
 		IPA_FREE(eim_cfg);
 	} else if (getopt_euicc_memory_reset) {
 		/* Perform an eUICC memory reset */
-		ipa_euicc_mem_rst(ctx, true, true, true, true, true);
+		ipa_euicc_mem_rst(ctx, getopt_euicc_memory_reset);
 	} else if (getopt_action != ACTION_NONE) {
 		/* Fire a single ES10b trigger (fallback / emergency / connectivity /
 		 * default-DP / immediate-enable) and exit -- these do not need the eIM. */
-		rc = run_es10b_trigger(ctx, getopt_action, getopt_default_dp, cfg.refresh_flag);
+		rc = run_es10b_trigger(ctx, getopt_action, getopt_default_dp, getopt_cfg_ie_oid, cfg.refresh_flag);
 		if (rc < 0)
 			rc = -EINVAL;
 	} else {

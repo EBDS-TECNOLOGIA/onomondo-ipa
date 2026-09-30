@@ -58,8 +58,6 @@ void ipa_http_free(void *c) { (void)c; }
 void ipa_http_set_timeouts(void *c, long a, long b) { (void)c; (void)a; (void)b; }
 int ipa_http_set_ca_cert_der(void *c, const uint8_t *d, size_t l) { (void)c; (void)d; (void)l; return 0; }
 int ipa_http_set_ca_pk_spki(void *c, const uint8_t *s, size_t l) { (void)c; (void)s; (void)l; return 0; }
-int ipa_http_set_client_cert_der(void *c, const uint8_t *d, size_t l, ipa_tls_sign_fn f, void *a)
-{ (void)c; (void)d; (void)l; (void)f; (void)a; return 0; }
 
 int main(int argc, char **argv)
 {

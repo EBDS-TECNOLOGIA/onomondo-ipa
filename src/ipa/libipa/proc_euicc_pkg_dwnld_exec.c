@@ -10,15 +10,14 @@
  * =====================================================================
  * v1.1/v1.2 migration notes for this file (see MIGRATION.md):
  * =====================================================================
- * UPDATE for v1.1: 2.11.2.1 — HIGH RISK: the signing input for euiccSignEPR /
- *   euiccSignEPE changed.  In v1.0 the eUICC signs over
- *   `euiccPackageResultDataSigned || eimSignature`; in v1.2 it signs over
- *   `euiccPackageResultDataSigned || associationToken` (integer, zero if none).
- *   This is eUICC-side signing, so the IPAd normally does not compute the
- *   signature.  BUT the consumer-eUICC emulation path used by this project
- *   (when -E is supplied) DOES synthesise eUICC signatures; that synthesis
- *   code must be updated accordingly.  TODO v1.1: locate signing helper and
- *   switch the TBS construction.
+ * UPDATE for v1.1: 2.11.2.1 — the signing input for euiccSignEPR / euiccSignEPE
+ *   changed: v1.0 signs over `euiccPackageResultDataSigned || eimSignature`,
+ *   v1.2 over `euiccPackageResultDataSigned || associationToken` (zero if none).
+ *   Nothing to do here.  The signature is produced inside the eUICC with
+ *   SK.EUICC.ECDSA; libipa never builds the TBS and contains no ECDSA signing.
+ *   The consumer-eUICC emulation cannot produce it either, and emits a fixed
+ *   placeholder instead — see the note in load_euicc_pkg_iot_emu()
+ *   (es10b_load_euicc_pkg.c) for what that costs.
  *
  * UPDATE for v1.1: 2.11.1.1 — EuiccPackageSigned.transactionId renamed to
  *   eimTransactionId.  Propagate rename wherever this field is accessed.
@@ -28,11 +27,6 @@
  *   configureImmediateEnableResult, new setFallbackAttributeResult /
  *   unsetFallbackAttributeResult / setDefaultDpAddressResult branches).
  *   Any switch on EuiccResultData_PR must handle the new branches.
- *
- * UPDATE for v1.2: CR111007R00 / 5.9.15 — on ImmediateEnable, rollback
- *   authorization must be reset also when refreshFlag == true.  Same for
- *   EnableEmergencyProfile / DisableEmergencyProfile (5.9.22 / 5.9.23).
- *   TODO v1.2: verify rollback authorization reset path below.
  *
  * UPDATE for v1.1: 5.9.11 — RetrieveNotificationsListResponse dropped the
  *   notificationAndEprList branch; the code below always uses seqNumber
@@ -49,6 +43,7 @@
 #include <assert.h>
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <onomondo/ipa/mem.h>
 #include <onomondo/ipa/utils.h>
 #include <onomondo/ipa/log.h>
@@ -57,12 +52,22 @@
 #include "esipa_get_eim_pkg.h"
 #include "es10b_load_euicc_pkg.h"
 #include "es10b_retr_notif_from_lst.h"
+#include <EimPackageResultErrorCode.h>
 #include "esipa_prvde_eim_pkg_rslt.h"
 #include "es10b_rm_notif_from_lst.h"
 #include "proc_euicc_pkg_dwnld_exec.h"
 #include "es10b_prfle_rollback.h"
 
-static int remove_notifications(struct ipa_context *ctx, struct EimAcknowledgements *eim_acknowledgements)
+/* Remove the notifications the eIM acknowledged.
+ *
+ * skip_seq_number names one sequence number that must not be forwarded to the eUICC, or is negative
+ * when there is none.  Under the IoT eUICC emulation the eUICC Package Result's sequence number is
+ * synthesised by this library rather than allocated by the card (see
+ * ipa_nvstate.iot_euicc_emu.epr_seq_number), so the eIM acknowledging it -- which section 3.1.1.1
+ * step 8 has it do -- would otherwise have the IPA delete whatever real, possibly undelivered
+ * Notification the consumer eUICC happens to hold under that number. */
+static int remove_notifications(struct ipa_context *ctx, struct EimAcknowledgements *eim_acknowledgements,
+				long skip_seq_number)
 {
 	unsigned int i;
 	int rc;
@@ -74,12 +79,92 @@ static int remove_notifications(struct ipa_context *ctx, struct EimAcknowledgeme
 		return 0;
 
 	for (i = 0; i < eim_acknowledgements->list.count; i++) {
-		rc = ipa_es10b_rm_notif_from_lst(ctx, *eim_acknowledgements->list.array[i]);
+		long seq_number = *eim_acknowledgements->list.array[i];
+
+		if (skip_seq_number >= 0 && seq_number == skip_seq_number) {
+			IPA_LOGP(SIPA, LDEBUG,
+				 "the eIM acknowledged the eUICC package result (sequence number %ld), which this "
+				 "eUICC never stored -- not removing anything for it\n", seq_number);
+			continue;
+		}
+		rc = ipa_es10b_rm_notif_from_lst(ctx, seq_number);
 		if (rc < 0)
 			return -EINVAL;
 	}
 
 	return 0;
+}
+
+/* Does this eUICC Package Result describe the execution of at least one PSMO?
+ *
+ * SGP.32, section 3.3.1 step 9 makes the retrieval of pending Notifications conditional on the eUICC Package
+ * containing PSMO(s). Only PSMOs can lead to Notifications (step 8 generates them when a Profile is enabled,
+ * disabled or deleted), so a package that carries eCOs alone -- addEim, deleteEim, updateEim, listEim -- has
+ * nothing for ES10b.RetrieveNotificationsList to find and the call is skipped.
+ *
+ * The decision is taken on the result rather than on the request because the result is what the eUICC actually
+ * executed: step 5 stops at the first failing operation, so a PSMO further down the list may never have run. */
+bool ipa_euicc_pkg_contains_psmo(const struct EuiccPackageResult *res)
+{
+	unsigned int i;
+
+	/* Only euiccPackageResultSigned carries a list of executed operations; the two error branches mean the
+	 * eUICC rejected the package outright, so nothing was executed. */
+	if (!res || res->present != EuiccPackageResult_PR_euiccPackageResultSigned)
+		return false;
+
+	for (i = 0; i < res->choice.euiccPackageResultSigned.euiccPackageResultDataSigned.euiccResult.list.count; i++) {
+		const struct EuiccResultData *result_data =
+		    res->choice.euiccPackageResultSigned.euiccPackageResultDataSigned.euiccResult.list.array[i];
+
+		switch (result_data->present) {
+		/* The PSMOs of SGP.32, section 2.11.1.1.3 */
+		case EuiccResultData_PR_enableResult:
+		case EuiccResultData_PR_disableResult:
+		case EuiccResultData_PR_deleteResult:
+		case EuiccResultData_PR_listProfileInfoResult:
+		case EuiccResultData_PR_getRATResult:
+		case EuiccResultData_PR_configureImmediateEnableResult:
+		case EuiccResultData_PR_rollbackResult:
+		case EuiccResultData_PR_setFallbackAttributeResult:
+		case EuiccResultData_PR_unsetFallbackAttributeResult:
+		case EuiccResultData_PR_setDefaultDpAddressResult:
+			return true;
+		/* The eCOs of SGP.32, section 2.11.1.1.2, plus the abort marker: neither touches a Profile. */
+		case EuiccResultData_PR_addEimResult:
+		case EuiccResultData_PR_deleteEimResult:
+		case EuiccResultData_PR_updateEimResult:
+		case EuiccResultData_PR_listEimResult:
+		case EuiccResultData_PR_processingTerminated:
+		default:
+			break;
+		}
+	}
+
+	return false;
+}
+
+/* Sequence number of a eUICC Package Result, or a negative value when the result is one of the error branches
+ * that has none. EuiccPackageResult is a CHOICE, so the union member must not be read without checking. */
+long ipa_euicc_pkg_result_seq_number(const struct EuiccPackageResult *res)
+{
+	if (!res || res->present != EuiccPackageResult_PR_euiccPackageResultSigned)
+		return -1;
+
+	return res->choice.euiccPackageResultSigned.euiccPackageResultDataSigned.seqNumber;
+}
+
+/* Is this a notification list that is worth sending to the eIM?
+ *
+ * SGP.32, section 3.3.1 step 10 asks for the list to be included "in case of a non-empty list of pending
+ * Notifications". The notificationList of the ePRAndNotifications CHOICE is not OPTIONAL, so an empty list
+ * cannot be represented there: the plain euiccPackageResult branch has to be used instead. */
+bool ipa_notification_list_is_useful(const struct SGP32_RetrieveNotificationsListResponse *lst)
+{
+	if (!lst || lst->present != SGP32_RetrieveNotificationsListResponse_PR_notificationList)
+		return false;
+
+	return lst->choice.notificationList.list.count > 0;
 }
 
 /*! Continue Generic eUICC Package Download and Execution Procedure.
@@ -92,6 +177,7 @@ int ipa_proc_eucc_pkg_dwnld_exec_onset(struct ipa_context *ctx, struct ipa_proc_
 	struct ipa_es10b_retr_notif_from_lst_res *retr_notif_from_lst_res = NULL;
 	struct ipa_esipa_prvde_eim_pkg_rslt_req prvde_eim_pkg_rslt_req = { 0 };
 	struct ipa_esipa_prvde_eim_pkg_rslt_res *prvde_eim_pkg_rslt_res = NULL;
+	long seq_number;
 	int rc;
 
 	/* This function should not be called without a result from ipa_proc_eucc_pkg_dwnld_exec. */
@@ -102,24 +188,41 @@ int ipa_proc_eucc_pkg_dwnld_exec_onset(struct ipa_context *ctx, struct ipa_proc_
 	/* Make sure Step #3-#8 (ES10b.LoadEuiccPackage) was successful */
 	if (!res->load_euicc_pkg_res)
 		goto error;
-	else if (!res->load_euicc_pkg_res)
-		goto error;
 
-	/* Step #9 (ES10b.RetrieveNotificationsList) */
-	/* TODO: This should be a conditional step that is omitted when the eUICC package does not contain any PSMOs.
-	 * (it possibly does not hurt when the notification list is always included, even when it is empty.) */
-	/* UPDATE for v1.1: 5.9.11 — request type name retained; response parsing
+	seq_number = ipa_euicc_pkg_result_seq_number(res->load_euicc_pkg_res->res);
+
+	/* Step #9 (ES10b.RetrieveNotificationsList)
+	 *
+	 * "If the IPAd sends eUICC Package Result and Notifications to the eIM in a single eIM Package Result and
+	 * if the eUICC Package contains PSMO(s), the IPAd SHALL retrieve pending Notifications by calling
+	 * ES10b.RetrieveNotificationsList function." A package of eCOs alone cannot have produced a Notification,
+	 * so the eUICC is not asked for one.
+	 *
+	 * UPDATE for v1.1: 5.9.11 — request type name retained; response parsing
 	 * must drop notificationAndEprList branch (see es10b_retr_notif_from_lst.c). */
-	retr_notif_from_lst_req.search_criteria.choice.seqNumber =
-	    res->load_euicc_pkg_res->res->choice.euiccPackageResultSigned.euiccPackageResultDataSigned.seqNumber;
-	retr_notif_from_lst_req.search_criteria.present = RetrieveNotificationsListRequest__searchCriteria_PR_seqNumber;
-	retr_notif_from_lst_res = ipa_es10b_retr_notif_from_lst(ctx, &retr_notif_from_lst_req);
-	if (!retr_notif_from_lst_res)
-		goto error;
-	else if (retr_notif_from_lst_res->notif_lst_result_err)
-		goto error;
-	else if (!retr_notif_from_lst_res->sgp32_res)
-		goto error;
+	if (seq_number >= 0 && ipa_euicc_pkg_contains_psmo(res->load_euicc_pkg_res->res)) {
+		retr_notif_from_lst_req.search_criteria.choice.seqNumber = seq_number;
+		retr_notif_from_lst_req.search_criteria.present =
+		    RetrieveNotificationsListRequest__searchCriteria_PR_seqNumber;
+		retr_notif_from_lst_res = ipa_es10b_retr_notif_from_lst(ctx, &retr_notif_from_lst_req);
+
+		/* A failure here is not fatal. The eUICC Package Result is the payload that matters, and the
+		 * eUICC has already executed the package and moved its replay counter on, so dropping the whole
+		 * procedure would leave the eIM with no idea of the outcome. Step 10 allows the Notifications to
+		 * travel separately ("the IPAd MAY use ESipa.HandleNotification instead"), and the eIM can also
+		 * collect them later with the Notification Delivery procedure. */
+		if (!retr_notif_from_lst_res || retr_notif_from_lst_res->notif_lst_result_err
+		    || !retr_notif_from_lst_res->sgp32_res)
+			IPA_LOGP(SIPA, LERROR,
+				 "unable to retrieve the pending notifications, sending the eUICC Package Result "
+				 "on its own (the notifications stay pending in the eUICC)\n");
+	} else if (seq_number < 0) {
+		IPA_LOGP(SIPA, LDEBUG,
+			 "the eUICC rejected the package, so there are no pending notifications to retrieve.\n");
+	} else {
+		IPA_LOGP(SIPA, LDEBUG,
+			 "the eUICC package contains no PSMOs, skipping the retrieval of pending notifications.\n");
+	}
 
 	/* Step #10-#14 (ESipa.ProvideEimPackageResult) */
 	if (res->prfle_rollback_res && res->prfle_rollback_res->res->eUICCPackageResult) {
@@ -134,10 +237,16 @@ int ipa_proc_eucc_pkg_dwnld_exec_onset(struct ipa_context *ctx, struct ipa_proc_
 		 * (load_euicc_pkg_iot_emu does not populate raw_res). */
 		prvde_eim_pkg_rslt_req.raw_euicc_package_result = res->load_euicc_pkg_res->raw_res;
 	}
-	prvde_eim_pkg_rslt_req.sgp32_notification_list = retr_notif_from_lst_res->sgp32_res;
+	/* Only a non-empty list may travel with the result, see ipa_notification_list_is_useful(). */
+	if (retr_notif_from_lst_res && ipa_notification_list_is_useful(retr_notif_from_lst_res->sgp32_res))
+		prvde_eim_pkg_rslt_req.sgp32_notification_list = retr_notif_from_lst_res->sgp32_res;
 	prvde_eim_pkg_rslt_res = ipa_esipa_prvde_eim_pkg_rslt(ctx, &prvde_eim_pkg_rslt_req);
 
-	if (!prvde_eim_pkg_rslt_res) {
+	/* A provideEimPackageResultError means the eIM received the result but could not attribute it to an
+	 * eUICC (SGP.32, section 6.3.2.7), so it did not process it -- the same outcome as never reaching the
+	 * eIM at all, and handled the same way here. Treating it as success would delete the eUICC Package
+	 * Result notification below and lose the result for good, since the eUICC cannot reproduce it. */
+	if (!prvde_eim_pkg_rslt_res || prvde_eim_pkg_rslt_res->prvde_eim_pkg_rslt_err) {
 		/* In case we fail to communicate the EuiccPackageResult back to the eIM we may try to perform a
 		 * profile rollback. However, this maneuver only makes sense when the profile has actually changed.
 		 * The profile rollback can only be tried once and the eIM also must have allowed the profile rollback
@@ -158,12 +267,11 @@ int ipa_proc_eucc_pkg_dwnld_exec_onset(struct ipa_context *ctx, struct ipa_proc_
 
 		IPA_LOGP(SIPA, LERROR,
 			 "unable to send the EuiccPackageResult to the eIM. (attempting profile rollback)\n");
-		/* UPDATE for v1.2: CR111007R00 — when refreshFlag == true the eUICC
-		 * is expected to reset rollback authorization as part of ImmediateEnable;
-		 * ProfileRollback's semantics for refreshFlag are unchanged, but the
-		 * downstream ImmediateEnable/Emergency flows should honour CR111007R00.
-		 * TODO v1.2: confirm ctx->cfg->refresh_flag propagation here matches
-		 * the refreshFlag semantics defined in v1.2 §5.9.15/5.9.22/5.9.23. */
+		/* This refreshFlag is ProfileRollback's own (SGP.32, section 5.9.16): it selects whether the
+		 * eUICC swaps the Profiles straight away or through a REFRESH, and is unrelated to the flag of
+		 * the same name in sections 5.9.15/5.9.20/5.9.22/5.9.23. Section 5.9.16 puts the choice on the
+		 * device ("the IoT Device has the responsibility to ensure that the relevant conditions for use
+		 * are met"), which is why it comes from the configuration rather than from the eUICC Package. */
 		res->prfle_rollback_res = ipa_es10b_prfle_rollback(ctx, ctx->cfg->refresh_flag);
 		if (!res->prfle_rollback_res
 		    || res->prfle_rollback_res->res->cmdResult != ProfileRollbackResponse__cmdResult_ok) {
@@ -177,14 +285,22 @@ int ipa_proc_eucc_pkg_dwnld_exec_onset(struct ipa_context *ctx, struct ipa_proc_
 	}
 
 	/* Step #15-17 (ES10b.RemoveNotificationFromList) */
-	/* Remove the notification for the euiccPackageResult. */
-	rc = ipa_es10b_rm_notif_from_lst(ctx,
-					 res->load_euicc_pkg_res->res->choice.euiccPackageResultSigned.
-					 euiccPackageResultDataSigned.seqNumber);
-	if (rc < 0)
-		goto error;
+	/* Remove the notification for the euiccPackageResult. There is none to remove when the eUICC rejected
+	 * the package outright, since then it never allocated a sequence number for a result.
+	 *
+	 * Nor is there one under the IoT eUICC emulation, whatever the sequence number says: SGP.32 section
+	 * 5.9.12 extends this function to eUICC Package Results, but a consumer eUICC has no such concept and
+	 * stored nothing.  The number is this library's own (ipa_nvstate.iot_euicc_emu.epr_seq_number), so
+	 * sending it would name some unrelated real Notification and delete it -- possibly one still waiting
+	 * to be delivered. */
+	if (seq_number >= 0 && !IPA_EUICC_EMU(ctx)) {
+		rc = ipa_es10b_rm_notif_from_lst(ctx, seq_number);
+		if (rc < 0)
+			goto error;
+	}
 	/* Remove the notifications that the eIM has requested to remove in the provideEimPackageResultResponse. */
-	rc = remove_notifications(ctx, prvde_eim_pkg_rslt_res->eim_acknowledgements);
+	rc = remove_notifications(ctx, prvde_eim_pkg_rslt_res->eim_acknowledgements,
+				  IPA_EUICC_EMU(ctx) ? seq_number : -1);
 	if (rc < 0)
 		goto error;
 
@@ -242,6 +358,20 @@ struct ipa_proc_eucc_pkg_dwnld_exec_res *ipa_proc_eucc_pkg_dwnld_exec(struct ipa
 	}
 error:
 	IPA_LOGP(SIPA, LERROR, "Generic eUICC Package Download and Execution failed!\n");
+	/* Nothing reached the eIM: the eUICC never produced a EuiccPackageResult, so there is no result to
+	 * forward and the eIM would otherwise wait out the operation it dispatched.  SGP.32 section 6.3.2.7
+	 * has the IPA echo the eimTransactionId of the eIM Package, which here is the one the eIM signed
+	 * into euiccPackageSigned.
+	 *
+	 * undefinedError rather than invalidPackageFormat on purpose: the eUICC failing to answer and the
+	 * package being malformed both arrive here, and telling the eIM the package was bad when the eUICC
+	 * was merely unreachable would have it discard a package that is in fact fine.
+	 *
+	 * error_silent below deliberately skips this.  It is reached when
+	 * ipa_proc_eucc_pkg_dwnld_exec_onset() failed, and that function sends the result itself -- so the
+	 * eIM has already been told, or could not be reached at all. */
+	ipa_esipa_report_eim_pkg_err(ctx, EimPackageResultErrorCode_undefinedError,
+				     euicc_package_request->euiccPackageSigned.eimTransactionId);
 error_silent:
 	ipa_proc_eucc_pkg_dwnld_exec_res_free(res);
 	return NULL;

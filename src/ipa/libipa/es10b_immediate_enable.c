@@ -33,6 +33,7 @@
 #include "utils.h"
 #include "euicc.h"
 #include "es10x.h"
+#include "esipa_get_eim_pkg.h"
 #include "es10b_immediate_enable.h"
 #include "es10c_enable_prfle.h"
 
@@ -109,57 +110,57 @@ static int immediate_enable_emu(struct ipa_context *ctx)
 	int rc = ImmediateEnableResponse__immediateEnableResult_undefinedError;
 
 	/* Immediate enable must be active */
-	if (ctx->nvstate.iot_euicc_emu.auto_enable.flag == false) {
+	if (ctx->nvstate.iot_euicc_emu.immediate_enable.flag == false) {
 		rc = ImmediateEnableResponse__immediateEnableResult_immediateEnableNotAvailable;
 		goto error;
 	}
 
 	/* We also need either the smdp_oid or the smdp_address to verify against */
-	if (ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid == NULL &&
-	    ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address == NULL) {
+	if (ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid == NULL &&
+	    ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address == NULL) {
 		rc = ImmediateEnableResponse__immediateEnableResult_immediateEnableNotAvailable;
 		goto error;
 	}
 
 	/* Ensure the session context is present and complete */
-	if (ctx->iot_euicc_emu.auto_enable.smdp_address == NULL) {
+	if (ctx->iot_euicc_emu.immediate_enable.smdp_address == NULL) {
 		rc = ImmediateEnableResponse__immediateEnableResult_noSessionContext;
 		goto error;
 	}
-	if (ctx->iot_euicc_emu.auto_enable.smdp_oid == NULL) {
+	if (ctx->iot_euicc_emu.immediate_enable.smdp_oid == NULL) {
 		rc = ImmediateEnableResponse__immediateEnableResult_noSessionContext;
 		goto error;
 	}
-	if (ctx->iot_euicc_emu.auto_enable.profile_aid == NULL) {
+	if (ctx->iot_euicc_emu.immediate_enable.profile_aid == NULL) {
 		rc = ImmediateEnableResponse__immediateEnableResult_noSessionContext;
 		goto error;
 	}
 
 	/* Verify smdp OID (if configured) */
-	if (ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid) {
-		if (ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid->len !=
-		    ctx->iot_euicc_emu.auto_enable.smdp_oid->len) {
+	if (ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid) {
+		if (ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid->len !=
+		    ctx->iot_euicc_emu.immediate_enable.smdp_oid->len) {
 			rc = ImmediateEnableResponse__immediateEnableResult_immediateEnableNotAvailable;
 			goto error;
 		}
-		if (memcmp(ctx->nvstate.iot_euicc_emu.auto_enable.smdp_oid->data,
-			   ctx->iot_euicc_emu.auto_enable.smdp_oid->data,
-			   ctx->iot_euicc_emu.auto_enable.smdp_oid->len)) {
+		if (memcmp(ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_oid->data,
+			   ctx->iot_euicc_emu.immediate_enable.smdp_oid->data,
+			   ctx->iot_euicc_emu.immediate_enable.smdp_oid->len)) {
 			rc = ImmediateEnableResponse__immediateEnableResult_immediateEnableNotAvailable;
 			goto error;
 		}
 	}
 
 	/* Verify smdp address (if configured) */
-	if (ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address) {
-		if (ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address->len !=
-		    ctx->iot_euicc_emu.auto_enable.smdp_address->len) {
+	if (ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address) {
+		if (ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address->len !=
+		    ctx->iot_euicc_emu.immediate_enable.smdp_address->len) {
 			rc = ImmediateEnableResponse__immediateEnableResult_immediateEnableNotAvailable;
 			goto error;
 		}
-		if (memcmp(ctx->nvstate.iot_euicc_emu.auto_enable.smdp_address->data,
-			   ctx->iot_euicc_emu.auto_enable.smdp_address->data,
-			   ctx->iot_euicc_emu.auto_enable.smdp_address->len)) {
+		if (memcmp(ctx->nvstate.iot_euicc_emu.immediate_enable.smdp_address->data,
+			   ctx->iot_euicc_emu.immediate_enable.smdp_address->data,
+			   ctx->iot_euicc_emu.immediate_enable.smdp_address->len)) {
 			rc = ImmediateEnableResponse__immediateEnableResult_immediateEnableNotAvailable;
 			goto error;
 		}
@@ -168,8 +169,8 @@ static int immediate_enable_emu(struct ipa_context *ctx)
 	/* Enable profile */
 	enable_prfle_req.req.profileIdentifier.present = EnableProfileRequest__profileIdentifier_PR_isdpAid;
 	IPA_ASSIGN_BUF_TO_ASN(enable_prfle_req.req.profileIdentifier.choice.isdpAid,
-			      ctx->iot_euicc_emu.auto_enable.profile_aid->data,
-			      ctx->iot_euicc_emu.auto_enable.profile_aid->len);
+			      ctx->iot_euicc_emu.immediate_enable.profile_aid->data,
+			      ctx->iot_euicc_emu.immediate_enable.profile_aid->len);
 
 	enable_prfle_res = ipa_es10c_enable_prfle(ctx, &enable_prfle_req);
 	if (enable_prfle_res && enable_prfle_res->res->enableResult == EnableProfileResponse__enableResult_ok)
@@ -189,12 +190,12 @@ error:
 	}
 
 	/* Ensure the immediate enable data is cleared after use */
-	ipa_buf_free(ctx->iot_euicc_emu.auto_enable.smdp_oid);
-	ctx->iot_euicc_emu.auto_enable.smdp_oid = NULL;
-	ipa_buf_free(ctx->iot_euicc_emu.auto_enable.smdp_address);
-	ctx->iot_euicc_emu.auto_enable.smdp_address = NULL;
-	ipa_buf_free(ctx->iot_euicc_emu.auto_enable.profile_aid);
-	ctx->iot_euicc_emu.auto_enable.profile_aid = NULL;
+	ipa_buf_free(ctx->iot_euicc_emu.immediate_enable.smdp_oid);
+	ctx->iot_euicc_emu.immediate_enable.smdp_oid = NULL;
+	ipa_buf_free(ctx->iot_euicc_emu.immediate_enable.smdp_address);
+	ctx->iot_euicc_emu.immediate_enable.smdp_address = NULL;
+	ipa_buf_free(ctx->iot_euicc_emu.immediate_enable.profile_aid);
+	ctx->iot_euicc_emu.immediate_enable.profile_aid = NULL;
 
 	ipa_es10c_enable_prfle_res_free(enable_prfle_res);
 	return rc;
@@ -206,8 +207,15 @@ error:
  *  \returns positive status code on success, negative on error. */
 int ipa_es10b_immediate_enable(struct ipa_context *ctx, bool refresh_flag)
 {
-	if (ctx->cfg->iot_euicc_emu_enabled)
-		return immediate_enable_emu(ctx);
+	int rc;
+
+	if (IPA_EUICC_EMU(ctx))
+		rc = immediate_enable_emu(ctx);
 	else
-		return immediate_enable(ctx, refresh_flag);
+		rc = immediate_enable(ctx, refresh_flag);
+
+	if (rc == ImmediateEnableResponse__immediateEnableResult_ok)
+		ipa_esipa_note_state_change(ctx, IPA_STATE_CHANGE_IMMEDIATE_ENABLE_PROFILE);
+
+	return rc;
 }

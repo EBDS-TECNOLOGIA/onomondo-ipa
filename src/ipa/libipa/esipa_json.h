@@ -54,12 +54,17 @@ struct ipa_buf *ipa_esipa_json_enc_init_auth_req(const struct ipa_esipa_init_aut
 struct ipa_buf *ipa_esipa_json_enc_auth_clnt_req(const struct ipa_esipa_auth_clnt_req *req);
 struct ipa_buf *ipa_esipa_json_enc_get_bnd_prfle_pkg_req(const struct ipa_esipa_get_bnd_prfle_pkg_req *req);
 struct ipa_buf *ipa_esipa_json_enc_get_eim_pkg_req(const uint8_t *eid, bool notify_state_change,
-						   int state_change_cause /* -1 = absent */);
+						   int state_change_cause /* -1 = absent */,
+						   const uint8_t *rplmn /* NULL = absent */);
 struct ipa_buf *ipa_esipa_json_enc_prvde_eim_pkg_rslt_req(const struct ipa_context *ctx,
 							  const struct ipa_esipa_prvde_eim_pkg_rslt_req *req);
 struct ipa_buf *ipa_esipa_json_enc_handle_notif_req(const struct ipa_esipa_handle_notif_req *req);
 struct ipa_buf *ipa_esipa_json_enc_cancel_session_req(const struct ipa_esipa_cancel_session_req *req);
 struct ipa_buf *ipa_esipa_json_enc_transfer_eim_pkg_rsp(const struct ipa_esipa_prvde_eim_pkg_rslt_req *req);
+
+/* Report whether the eIM's response header says the function succeeded.  For ESipa.CancelSession,
+ * which section 6.4.1.8 gives no response body, that header is the whole response. */
+bool ipa_esipa_json_exec_ok(const struct ipa_buf *body, const char *function_name);
 
 /* ---- Decoders (eIM -> IPA responses) ---------------------------------- */
 

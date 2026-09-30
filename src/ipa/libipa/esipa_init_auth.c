@@ -10,9 +10,10 @@
  * =====================================================================
  * v1.1/v1.2 migration notes for this file:
  * =====================================================================
- * UPDATE for v1.1: 5.14.1 / 6.3.2.1 — InitiateAuthenticationRequestEsipa adds
- *   optional eimTransactionId [2] TransactionId.  If the IPA has an
- *   outstanding transaction it should echo it back here.
+ * DONE for v1.1: 5.14.1 / 6.3.2.1 — InitiateAuthenticationRequestEsipa adds
+ *   optional eimTransactionId [2] TransactionId.  It is taken from the
+ *   ProfileDownloadTriggerRequest that started the download and threaded
+ *   through ipa_proc_indirect_prfle_dwnlod() and ipa_proc_cmn_mtl_auth().
  * UPDATE for v1.1: 6.3.2.1 — InitiateAuthenticationErrorEsipa gains
  *   invalidEimTransactionId(52) and undefinedError(127).  Error table below
  *   must be extended after libasn regeneration.
@@ -54,7 +55,20 @@ static const struct num_str_map error_code_strings[] = {
 	{ 0, NULL }
 };
 
-static struct ipa_buf *enc_init_auth_req(struct ipa_context *ctx, const void *req_)
+/*! Name of an ESipa.InitiateAuthentication error code, for log messages.
+ *  \param[in] err the error code as decoded from the eIM response.
+ *  \returns the code's name from the ASN.1 definition (section 6.3.2.1), or "(unknown)".
+ *
+ *  Shared by both wire bindings on purpose: the JSON binding carries the same codes, and the two
+ *  must not describe one code by two different names. */
+const char *ipa_esipa_init_auth_err_str(long err)
+{
+	return ipa_str_from_num(error_code_strings, err, "(unknown)");
+}
+
+#ifdef IPA_HAVE_ESIPA_ASN1		/* ESipa ASN.1 binding, SGP.32 section 6.3 */
+
+struct ipa_buf *ipa_esipa_init_auth_enc_req(struct ipa_context *ctx, const void *req_)
 {
 	const struct ipa_esipa_init_auth_req *req = req_;
 	struct EsipaMessageFromIpaToEim msg_to_eim = { 0 };
@@ -76,13 +90,10 @@ static struct ipa_buf *enc_init_auth_req(struct ipa_context *ctx, const void *re
 	/* eUICC info */
 	msg_to_eim.choice.initiateAuthenticationRequestEsipa.euiccInfo1 = (EUICCInfo1_t *) req->euicc_info_1;
 
-	/* TODO v1.1: 5.14.1 / 6.3.2.1 — populate optional eimTransactionId when
-	 * the IPA has a currently outstanding eIM transaction, e.g.:
-	 *   if (ctx->eim_transaction_id_present) {
-	 *       msg_to_eim.choice.initiateAuthenticationRequestEsipa.eimTransactionId =
-	 *           &ctx->eim_transaction_id;
-	 *   }
-	 * Requires new plumbing in struct ipa_esipa_init_auth_req and context. */
+	/* eIM transaction id, when this download was triggered by an eIM that supplied one. It is OPTIONAL on the
+	 * wire and stays absent for a download the IPA started by itself. */
+	msg_to_eim.choice.initiateAuthenticationRequestEsipa.eimTransactionId =
+	    (TransactionId_t *) req->eim_transaction_id;
 
 	/* Encode */
 	return ipa_esipa_msg_to_eim_enc(&msg_to_eim, "InitiateAuthentication");
@@ -124,6 +135,9 @@ static void *dec_init_auth_res(const struct ipa_buf *msg_to_ipa_encoded, const v
 	return res;
 }
 
+#endif /* IPA_HAVE_ESIPA_ASN1 */
+
+#ifdef IPA_HAVE_ESIPA_JSON		/* ESipa JSON binding, SGP.32 section 6.4 */
 static struct ipa_buf *json_enc_init_auth_req(struct ipa_context *ctx, const void *req)
 {
 	(void)ctx;
@@ -135,6 +149,8 @@ static void *json_dec_init_auth_res(const struct ipa_buf *res, const void *req)
 	(void)req;
 	return ipa_esipa_json_dec_init_auth_res(res);
 }
+
+#endif /* IPA_HAVE_ESIPA_JSON */
 
 /*! Function (ESipa): InitiateAuthentication.
  *  \param[inout] ctx pointer to ipa_context.
@@ -148,8 +164,8 @@ struct ipa_esipa_init_auth_res *ipa_esipa_init_auth(struct ipa_context *ctx, con
 		       ipa_hexdump(req->euicc_challenge, IPA_LEN_EUICC_CHLG));
 
 	res = ipa_esipa_call(ctx, "InitiateAuthentication", req,
-			     enc_init_auth_req, dec_init_auth_res,
-			     json_enc_init_auth_req, json_dec_init_auth_res);
+			     IPA_ESIPA_ASN1_CB(ipa_esipa_init_auth_enc_req, dec_init_auth_res),
+			     IPA_ESIPA_JSON_CB(json_enc_init_auth_req, json_dec_init_auth_res));
 
 	/* The serverSigned1 cross-checks below only apply to the ASN.1 binding;
 	 * the JSON binding did not run them before this was factored out, so keep
@@ -186,5 +202,14 @@ struct ipa_esipa_init_auth_res *ipa_esipa_init_auth(struct ipa_context *ctx, con
  *  \param[in] res pointer to function result. */
 void ipa_esipa_init_auth_res_free(struct ipa_esipa_init_auth_res *res)
 {
+	/* The two bindings own their result members differently, and IPA_ESIPA_RES_FREE only knows the
+	 * ASN.1 model: there every member points into msg_to_ipa, so freeing that one tree frees
+	 * everything.  The JSON decoders allocate their members instead and leave msg_to_ipa NULL, which
+	 * is what distinguishes the two at run time -- both bindings are compiled in and the choice is
+	 * ctx->cfg->esipa_binding.  This is the "caller must free those first" case the macro's own
+	 * comment describes.
+	 */
+	if (res && !res->msg_to_ipa)
+		ASN_STRUCT_FREE(asn_DEF_InitiateAuthenticationOkEsipa, res->init_auth_ok);
 	IPA_ESIPA_RES_FREE(res);
 }
