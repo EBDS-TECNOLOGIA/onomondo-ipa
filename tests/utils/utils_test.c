@@ -126,11 +126,88 @@ void ipa_strip_tlv_envelope_test(void)
 	}
 }
 
+
+/* ipa_retry_after_from_header(): only the delta-seconds form of RFC 9110 10.2.3 is
+ * accepted, and the line arrives as libcurl hands it over -- not NUL terminated,
+ * CRLF still attached. */
+static void ipa_retry_after_from_header_test(void)
+{
+	struct {
+		const char *line;
+		bool ok;
+		long secs;
+	} cases[] = {
+		/* the case the eIM actually sends */
+		{ "Retry-After: 1200\r\n",		true,	1200 },
+		/* header names are case insensitive */
+		{ "retry-after: 1200\r\n",		true,	1200 },
+		{ "RETRY-AFTER: 1200\r\n",		true,	1200 },
+		/* optional whitespace, and none at all */
+		{ "Retry-After:1200\r\n",		true,	1200 },
+		{ "Retry-After: \t 1200\r\n",		true,	1200 },
+		/* bare LF, and no line ending at all */
+		{ "Retry-After: 1200\n",		true,	1200 },
+		{ "Retry-After: 1200",			true,	1200 },
+		/* zero is a legitimate "come back at once" */
+		{ "Retry-After: 0\r\n",			true,	0 },
+		/* an HTTP-date is rejected rather than guessed at */
+		{ "Retry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n", false, 0 },
+		/* rubbish, partial numbers and negatives */
+		{ "Retry-After: soon\r\n",		false,	0 },
+		{ "Retry-After: 12x\r\n",		false,	0 },
+		{ "Retry-After: -60\r\n",		false,	0 },
+		{ "Retry-After: \r\n",			false,	0 },
+		{ "Retry-After:\r\n",			false,	0 },
+		/* a value too long to be a usable delta-seconds */
+		{ "Retry-After: 111111111111111111111111111111111111\r\n", false, 0 },
+		/* other headers, and ones that merely start the same way */
+		{ "Content-Type: application/json\r\n",	false,	0 },
+		{ "Retry-Afterwards: 5\r\n",		false,	0 },
+		{ "Retry-After\r\n",			false,	0 },
+		/* the status line and the terminating empty line libcurl also delivers */
+		{ "HTTP/1.1 200 OK\r\n",		false,	0 },
+		{ "\r\n",				false,	0 },
+	};
+	unsigned int i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		long secs = -12345;
+		bool ok = ipa_retry_after_from_header(cases[i].line, strlen(cases[i].line), &secs);
+
+		/* Print the line without its line ending, or the report is unreadable. */
+		char shown[80];
+		size_t n = strcspn(cases[i].line, "\r\n");
+
+		if (n >= sizeof(shown))
+			n = sizeof(shown) - 1;
+		memcpy(shown, cases[i].line, n);
+		shown[n] = '\0';
+		printf("  %-46s -> %s", shown, ok ? "ok" : "rejected");
+		if (ok)
+			printf(", %ld s", secs);
+		printf("\n");
+		assert(ok == cases[i].ok);
+		if (ok)
+			assert(secs == cases[i].secs);
+		else
+			assert(secs == -12345); /* untouched on rejection */
+	}
+
+	/* Defensive: a NULL line or output pointer is a rejection, not a crash. */
+	{
+		long secs = 0;
+
+		assert(ipa_retry_after_from_header(NULL, 10, &secs) == false);
+		assert(ipa_retry_after_from_header("Retry-After: 1\r\n", 17, NULL) == false);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	ipa_tag_in_taglist_test();
 	ipa_parse_btlv_hdr_test();
 	ipa_strip_tlv_envelope_test();
+	ipa_retry_after_from_header_test();
 	return 0;
 }
 
@@ -153,6 +230,12 @@ void ipa_http_close(void *http_ctx)
 void ipa_http_free(void *http_ctx)
 {
 	return;
+}
+
+long ipa_http_get_retry_after(void *http_ctx)
+{
+	(void)http_ctx;
+	return -1;
 }
 
 void *ipa_scard_init(unsigned int reader_num)

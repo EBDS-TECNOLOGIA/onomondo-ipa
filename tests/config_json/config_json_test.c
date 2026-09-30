@@ -40,6 +40,8 @@ static void defaults_test(void)
 	assert(rcfg->cfg.eim_disable_ssl == false);
 	assert(rcfg->cfg.eim_disable_ssl_verif == false);
 	assert(rcfg->cfg.iot_euicc_emu_enabled == false);
+	/* Retry-After is honoured unless the operator turns it off. */
+	assert(rcfg->cfg.honour_retry_after == true);
 	assert(rcfg->cfg.refresh_flag == false);
 	assert(strcmp(rcfg->nvstate_path, IPA_DEFAULT_NVSTATE_PATH) == 0);
 	assert(rcfg->initial_eim_cfg_path == NULL);
@@ -72,6 +74,7 @@ static void full_config_test(void)
 		"\"eim_disable_ssl\": true,"
 		"\"eim_disable_ssl_verif\": true,"
 		"\"iot_euicc_emu_enabled\": true,"
+		"\"honour_retry_after\": false,"
 		"\"one_euicc_pkg_only\": true,"
 		"\"refresh_flag\": true,"
 		"\"esipa_binding\": \"json\","
@@ -103,6 +106,7 @@ static void full_config_test(void)
 	assert(rcfg->cfg.eim_disable_ssl == true);
 	assert(rcfg->cfg.eim_disable_ssl_verif == true);
 	assert(rcfg->cfg.iot_euicc_emu_enabled == true);
+	assert(rcfg->cfg.honour_retry_after == false);
 	assert(rcfg->one_euicc_pkg_only == true);
 	assert(rcfg->cfg.refresh_flag == true);
 	assert(rcfg->cfg.esipa_binding == IPA_ESIPA_BINDING_JSON);
@@ -156,6 +160,8 @@ static void rejection_test(void)
 		"{\"eim_disable_ssl\": 1}",
 		"{\"tac\": 12345678}",
 		"{\"esipa_binding\": 0}",
+		"{\"honour_retry_after\": \"yes\"}",
+		"{\"honour_retry_after\": 1}",
 		"{\"log\": \"/var/log/ipa.log\"}",
 		/* out of range */
 		"{\"reader_num\": -1}",

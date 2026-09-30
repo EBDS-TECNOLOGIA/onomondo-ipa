@@ -220,6 +220,7 @@ void *ipa_http_init(const char *cabundle, bool no_verif) { (void)cabundle; (void
 struct ipa_buf *ipa_http_req(void *c, const struct ipa_buf *r, const char *u) { (void)c; (void)r; (void)u; return NULL; }
 void ipa_http_close(void *c) { (void)c; }
 void ipa_http_free(void *c) { (void)c; }
+long ipa_http_get_retry_after(void *c) { (void)c; return -1; }
 void *ipa_scard_init(unsigned int n) { (void)n; return NULL; }
 int ipa_scard_reset(void *c) { (void)c; return 0; }
 int ipa_scard_atr(void *c, struct ipa_buf *a) { (void)c; (void)a; return 0; }

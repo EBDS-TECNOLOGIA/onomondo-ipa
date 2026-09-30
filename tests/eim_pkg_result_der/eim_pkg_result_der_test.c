@@ -336,6 +336,7 @@ struct ipa_buf *ipa_http_req(void *c, const struct ipa_buf *r, const char *u) { 
 struct ipa_buf *ipa_http_req_with_ct(void *c, const struct ipa_buf *r, const char *u, const char *t) { (void)c; (void)r; (void)u; (void)t; return NULL; }
 void ipa_http_close(void *c) { (void)c; }
 void ipa_http_free(void *c) { (void)c; }
+long ipa_http_get_retry_after(void *c) { (void)c; return -1; }
 void *ipa_scard_init(unsigned int n) { (void)n; return NULL; }
 int ipa_scard_reset(void *c) { (void)c; return 0; }
 int ipa_scard_atr(void *c, struct ipa_buf *a) { (void)c; (void)a; return 0; }

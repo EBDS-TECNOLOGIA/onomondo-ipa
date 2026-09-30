@@ -55,6 +55,7 @@ struct ipa_buf *ipa_http_req_with_ct(void *c, const struct ipa_buf *r, const cha
 { (void)c; (void)r; (void)u; (void)t; return NULL; }
 void ipa_http_close(void *c) { (void)c; }
 void ipa_http_free(void *c) { (void)c; }
+long ipa_http_get_retry_after(void *c) { (void)c; return -1; }
 void ipa_http_set_timeouts(void *c, long a, long b) { (void)c; (void)a; (void)b; }
 int ipa_http_set_ca_cert_der(void *c, const uint8_t *d, size_t l) { (void)c; (void)d; (void)l; return 0; }
 int ipa_http_set_ca_pk_spki(void *c, const uint8_t *s, size_t l) { (void)c; (void)s; (void)l; return 0; }

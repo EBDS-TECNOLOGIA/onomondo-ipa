@@ -834,3 +834,4 @@ struct ipa_buf *ipa_http_req_with_ct(void *c, const struct ipa_buf *r, const cha
 long ipa_http_last_status(void *c) { (void)c; return 200; }
 void ipa_http_close(void *c) { (void)c; }
 void ipa_http_free(void *c) { (void)c; }
+long ipa_http_get_retry_after(void *c) { (void)c; return -1; }

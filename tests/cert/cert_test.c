@@ -174,6 +174,12 @@ void ipa_http_free(void *http_ctx)
 	return;
 }
 
+long ipa_http_get_retry_after(void *http_ctx)
+{
+	(void)http_ctx;
+	return -1;
+}
+
 void *ipa_scard_init(unsigned int reader_num)
 {
 	return NULL;
