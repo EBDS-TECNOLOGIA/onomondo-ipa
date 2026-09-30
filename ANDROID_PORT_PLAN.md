@@ -130,10 +130,11 @@ same way via `CMAKE_FIND_ROOT_PATH`.
 **Status: implemented AND validated on real hardware (2026-08-13).** The Phase-1
 transport spike ran end-to-end against a Thales "GTO" SGP.32 eUICC: ES10c GetEID
 / ES10b GetEUICCInfo1 / GetEUICCInfo2 all succeeded (real EID + EUICCInfo2 with
-a test-profile label returned). **Result on the gating risk (positive):** the
-modem EXPOSES ISO 61xx chaining — STORE DATA returns `61xx` and `GET RESPONSE`
-over the logical channel assembles the full body, so the core's own
-`recv_es10x_block` loop is viable as-is; the modem does NOT auto-assemble. **Key
+a test-profile label returned). **Result on the gating risk:** this modem
+EXPOSES ISO 61xx chaining — STORE DATA returns `61xx` and `GET RESPONSE` over
+the logical channel assembles the full body, so the core's own
+`recv_es10x_block` loop works as-is. **That result is per-device, not a property
+of Android** — see "61xx chaining: both behaviours occur" below. **Key
 finding:** the transport MUST send TERMINAL CAPABILITY on the basic channel
 (`iccTransmitApduBasicChannel`, `80 AA 00 00 05 A9 03 84 01 01`) during channel
 setup — a phone modem's power-on TERMINAL CAPABILITY did not advertise
@@ -168,25 +169,54 @@ What landed:
   `Java_com_onomondo_ipa_EuiccChannel_nativeRegister` / `...nativeUnregister`
   are exported.
 
-**Still owed (the on-hardware spike, unchanged as the gating risk):** confirm
-`iccTransmitApduLogicalChannel`'s 61xx GET RESPONSE behaviour against a real
-eSIM. The core drives its own 61xx loop and `EuiccChannel.transmit()` passes the
-framework response through verbatim; if a modem/RIL auto-assembles 61xx and
-returns the body with SW=9000 on the triggering command, the core would lose
-data. Also unresolved on-device: FETCH / TERMINAL RESPONSE for a proactive
-REFRESH (SW=91xx) are basic-channel STK APDUs that this logical-channel
-transport cannot route — expected to be handled by the modem, to be confirmed.
-These must be validated before relying on the backend.
+### 61xx chaining: both behaviours occur (closed 2026-09-28, commit `23a8a6b`)
 
-*Spike harness delivered (run it to close the 61xx item):* `src/ipa/android_spike.c`
-adds a native diagnostic (`Java_..._EuiccSpike_nativeRunSpike`) built into
-`libipacore.so` that opens the ISD-R channel through the production transport,
-sends known ES10x commands (GetEID / GetEUICCInfo1 / GetEUICCInfo2), records
-every raw APDU exchange and classifies the modem's 61xx behaviour. The Gradle
-app that runs it and shows the report on screen lives in `android/`: a reusable,
-device-agnostic `:core` library (transport + native JNI + UI + a `DeviceProfile`
-seam) and a dependency-free `:app-generic` application (stock AOSP telephony). A
-device needing vendor-specific setup supplies its own `DeviceProfile` from an
+The gating risk turned out to be real, and the answer is that **both** modem
+behaviours exist in the field:
+
+- The bring-up POS (Thales "GTO", 2026-08-13) exposes the chaining: STORE DATA
+  answers `61xx` and the body is fetched with GET RESPONSE.
+- A second POS, reported from the field, has a RIL that runs the GET RESPONSE
+  chain itself and returns the whole ES10x body together with `SW=9000` on the
+  STORE DATA. The core kept only the status word and discarded the payload, so
+  every ES10x command failed with "cannot decode eUICC response" on an empty
+  buffer — GetEID included, which meant the IPAd could not initialise at all.
+
+The core now serves both from one binary, keyed on what the transport actually
+returned rather than on the device: `send_es10x_block()` keeps any payload that
+arrives with the STORE DATA response, and `euicc_transceive_es10x()` decides
+from the status word whether a GET RESPONSE loop is still needed. On a
+transport that exposes 61xx there is no such payload, so that path is unchanged
+— which is why PC/SC and the Linux CLI are unaffected.
+
+Two latent defects were fixed with it, both reachable as soon as a command
+larger than GetEID ran on an assembling modem: `send_es10x_block()`'s receive
+buffer was `MAX_BLOCKSIZE_TX + 2` (257 bytes) and would have clipped an
+assembled `GetEUICCInfo2` (now `MAX_INLINE_RES_RX`), and `parse_res_apdu()`
+copied into a 255-byte array without bounds — a `GET RESPONSE` with `Le=256`
+overflowed it by one byte on **every** platform, Linux included (the array is
+now `MAX_BLOCKSIZE_RX` and the copy is checked).
+
+Covered by `tests/es10x_chaining`, which drives `ipa_euicc_transceive_es10x()`
+through a scripted scard mock in both shapes, with short and multi-block
+bodies; against the unpatched core it reproduces the field log exactly.
+
+**Still owed on-device:** FETCH / TERMINAL RESPONSE for a proactive REFRESH
+(SW=91xx) are basic-channel STK APDUs that this logical-channel transport
+cannot route — expected to be handled by the modem, to be confirmed. This needs
+a real profile enable/disable and must be validated before relying on the
+backend for that flow.
+
+*Spike harness (what classified the 61xx behaviour above; run it on any new
+device):* `src/ipa/android_spike.c` adds a native diagnostic
+(`Java_..._EuiccSpike_nativeRunSpike`) built into `libipacore.so` that opens the
+ISD-R channel through the production transport, sends known ES10x commands
+(GetEID / GetEUICCInfo1 / GetEUICCInfo2), records every raw APDU exchange and
+classifies the modem's 61xx behaviour. The Gradle app that runs it and shows the
+report on screen lives in `android/`: a reusable, device-agnostic `:core`
+library (transport + native JNI + UI + a `DeviceProfile` seam) and a
+dependency-free `:app-generic` application (stock AOSP telephony). A device
+needing vendor-specific setup supplies its own `DeviceProfile` from an
 application module of its own, with every proprietary artifact confined there.
 The passive spike still does not exercise REFRESH (91xx) / FETCH / TERMINAL
 RESPONSE; that remains for a profile enable/disable on hardware.
@@ -204,7 +234,7 @@ Core-side change (single seam): add `scard_manages_channel` capability; make `ip
 
 JNI bridge: `scard_jni.c` (native) + a small Kotlin/Java `EuiccChannel` class wrapping `TelephonyManager`. Handle: exception propagation (Java exception -> `-EIO`), thread attach/detach (the poll loop runs on a native thread, so `AttachCurrentThread`), and slot/subscription selection.
 
-**Risk to validate early:** `iccTransmitApduLogicalChannel`'s CLA channel-bit handling and its treatment of GET RESPONSE / 61xx chaining — confirm the core's `recv_es10x_block` GET RESPONSE loop survives when the framework auto-handles 61xx. This is the single highest-risk item; prototype it against real hardware before building the rest.
+**Risk to validate early:** ~~`iccTransmitApduLogicalChannel`'s CLA channel-bit handling and its treatment of GET RESPONSE / 61xx chaining — confirm the core's `recv_es10x_block` GET RESPONSE loop survives when the framework auto-handles 61xx. This is the single highest-risk item; prototype it against real hardware before building the rest.~~ **Settled:** it was the right risk to call out. Both behaviours were found on real hardware and the core handles both; see "61xx chaining: both behaviours occur" above.
 
 ---
 
@@ -533,7 +563,7 @@ as far as this can be taken without the terminal in hand.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Framework channel management vs. core's self-managed channel/SELECT + 61xx GET RESPONSE handling | High | Prototype Phase-1 transceive against real hardware first; gate core changes behind `scard_manages_channel` so Linux is untouched. |
+| Framework channel management vs. core's self-managed channel/SELECT + 61xx GET RESPONSE handling | ~~High~~ **resolved** | Materialised on a second POS, whose RIL assembles the 61xx chain and returns the body with SW=9000. The core now keeps any payload returned with the STORE DATA and consults the status word before running its own GET RESPONSE loop, so one binary serves both kinds of modem; `scard_manages_channel` keeps Linux untouched. See Phase 1, "61xx chaining: both behaviours occur". |
 | `iccTransmitApduLogicalChannel` masking/rewriting CLA bits | Medium | Neutralize the core's CLA channel OR in the Android transport; test SW=9000 round-trips. |
 | SELinux denials for a system daemon reaching telephony | ~~Medium~~ **moot** | Resolved differently than expected: a native daemon cannot reach telephony at all (no JVM, no LPA package identity), so the telephony path runs in the app and sepolicy never enters into it. `contrib/android/sepolicy/` covers the native `ipad` daemon for integrator-supplied transports. |
 | BoringSSL/curl/jansson NDK build friction | Low | Well-trodden; superbuild. |
