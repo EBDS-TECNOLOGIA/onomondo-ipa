@@ -54,6 +54,15 @@ object NativeBridge {
      * returns once the eIM request and eUICC exchange in flight have finished,
      * so pair this with a join timeout if you need a hard deadline.
      */
+    /**
+     * Seconds the eIM asked for with a `Retry-After` header on the response that
+     * ended the last [run], or 0 when it asked for nothing. Only ever non-zero
+     * when `honour_retry_after` is set in the configuration.
+     */
+    private external fun nativeLastRetryAfterSeconds(): Int
+
+    fun lastRetryAfterSeconds(): Int = nativeLastRetryAfterSeconds()
+
     private external fun nativeStop()
 
     fun stop() = nativeStop()

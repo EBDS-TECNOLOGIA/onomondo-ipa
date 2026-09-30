@@ -45,6 +45,12 @@ static volatile sig_atomic_t run_stop;
 static pthread_mutex_t run_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool run_active;
 
+/* What the eIM asked for with Retry-After on the last completed run, in seconds, or 0 for nothing.  It lives
+ * here rather than on the context because the context is created and destroyed inside ipa_run(): the
+ * front-end that has to act on the value only gets control back once it is already gone.  Guarded by
+ * run_lock, like run_active, since the APK calls ipa_run() from a worker thread and reads this from another. */
+static unsigned int run_retry_after;
+
 void ipa_run_stop(void)
 {
 	run_stop = 1;
@@ -129,6 +135,7 @@ int ipa_run(struct ipa_run_config *rcfg)
 		return -EBUSY;
 	}
 	run_active = true;
+	run_retry_after = 0;
 	pthread_mutex_unlock(&run_lock);
 
 	run_stop = 0;
@@ -222,6 +229,12 @@ int ipa_run(struct ipa_run_config *rcfg)
 	}
 
 leave:
+	/* Read it out before ipa_free_ctx(): after that the context is gone, and this is the only thing
+	 * the front-end needs from it to schedule the next cycle. */
+	pthread_mutex_lock(&run_lock);
+	run_retry_after = ipa_retry_after_seconds(ctx);
+	pthread_mutex_unlock(&run_lock);
+
 	IPA_LOGP(SMAIN, LINFO, "-----------------------------8<-----------------------------\n");
 	nvstate_save = ipa_free_ctx(ctx);
 	if (nvstate_save) {
@@ -243,6 +256,16 @@ close_log:
 	pthread_mutex_unlock(&run_lock);
 
 	return rc;
+}
+
+unsigned int ipa_run_last_retry_after_seconds(void)
+{
+	unsigned int secs;
+
+	pthread_mutex_lock(&run_lock);
+	secs = run_retry_after;
+	pthread_mutex_unlock(&run_lock);
+	return secs;
 }
 
 int ipa_run_from_config(const char *json_path)

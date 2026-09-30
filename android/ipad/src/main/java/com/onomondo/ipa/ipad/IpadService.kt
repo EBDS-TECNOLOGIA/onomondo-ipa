@@ -195,8 +195,16 @@ class IpadService : Service() {
                 return
             }
 
-            setState(State.SLEEPING, "Next cycle in ${formatDuration(seconds)}")
-            waitBetweenCycles(seconds)
+            // The eIM may have asked to be left alone for a while on the response that
+            // ended this cycle. It applies to this wait only; the next one goes back to
+            // the configured interval unless the eIM asks again. The native side has
+            // already logged it, and returns 0 unless honour_retry_after is set.
+            val retryAfter = NativeBridge.lastRetryAfterSeconds().toLong()
+            val wait = if (retryAfter > 0L) retryAfter else seconds
+            val why = if (retryAfter > 0L) " (asked for by the eIM)" else ""
+
+            setState(State.SLEEPING, "Next cycle in ${formatDuration(wait)}$why")
+            waitBetweenCycles(wait)
         }
     }
 

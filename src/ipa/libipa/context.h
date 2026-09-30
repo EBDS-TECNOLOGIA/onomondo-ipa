@@ -178,6 +178,15 @@ struct ipa_context {
 	 *  location on startup (ipa_new_ctx) and stored to a non volatile location on exit (ipa_free_ctx). */
 	struct ipa_nvstate nvstate;
 
+	/*! `Retry-After` handling, see ipa_config.honour_retry_after.
+	 *
+	 *  pending holds what the most recent ESipa response carried, in seconds, or -1 for none; it is set by
+	 *  ipa_esipa_req() and only ipa_proc_eim_pkg_retr() decides what to do with it, because only there is it
+	 *  known whether the exchange actually ended. accepted is what survived that decision and what
+	 *  ipa_retry_after_seconds() reports; 0 means the eIM asked for nothing. */
+	int retry_after_pending;
+	unsigned int retry_after_accepted;
+
 	/*! A canary to detect smartcard (eUICC) communication errors */
 	bool check_scard;
 

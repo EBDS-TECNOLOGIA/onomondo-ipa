@@ -57,6 +57,19 @@ Java_com_onomondo_ipa_NativeBridge_nativeRun(JNIEnv *env, jobject thiz, jstring 
 	return rc;
 }
 
+/* com.onomondo.ipa.NativeBridge.nativeLastRetryAfterSeconds(): how long the eIM
+ * asked the IPAd to wait before the next getPackage, from a Retry-After header
+ * on the response that ended the last cycle.  0 when it asked for nothing, in
+ * which case the configured poll interval applies. */
+JNIEXPORT jint JNICALL
+Java_com_onomondo_ipa_NativeBridge_nativeLastRetryAfterSeconds(JNIEnv *env, jobject thiz)
+{
+	(void) env;
+	(void) thiz;
+
+	return (jint) ipa_run_last_retry_after_seconds();
+}
+
 /* com.onomondo.ipa.NativeBridge.nativeStop(): ask a running nativeRun() to
  * leave its poll loop.  Returns immediately; nativeRun() returns once the
  * in-flight eIM request and eUICC exchange have finished, so a caller that

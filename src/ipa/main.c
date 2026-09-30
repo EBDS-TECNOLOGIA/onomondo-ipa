@@ -342,6 +342,9 @@ int main(int argc, char **argv)
 	cfg.euicc_channel = DEFAULT_CHANNEL_NUMBER;
 	ipa_binary_from_hexstr(cfg.tac, sizeof(cfg.tac), DEFAULT_TAC);
 	cfg.esipa_req_retries = DEFAULT_ESIPA_REQ_RETRIES;
+	/* Same default as the configuration file (see ipa_run_config_defaults); this front-end runs a single
+	 * cycle and then exits, so the value is only reported, not acted on. */
+	cfg.honour_retry_after = true;
 	/* ASN.1 is the default binding and also the zero value of the enum, but a build may not have it -- then
 	 * there is only one binding to pick and no reason to make the operator pick it. */
 #ifdef IPA_HAVE_ESIPA_ASN1

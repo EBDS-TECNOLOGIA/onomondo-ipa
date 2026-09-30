@@ -282,6 +282,36 @@ The triggers are device-policy decisions a daemon makes through the `ipa_*`
 API in `ipad.h` at the moment its own signals fire, not a startup setting; the
 callback is deprecated (github issue #5) and is a function pointer.
 
+### `Retry-After`: letting the eIM set the poll cadence
+
+Not an SGP.32 mechanism, and specific to the eIM this deployment talks to: it
+answers a getPackage that has nothing pending with a `Retry-After: <seconds>`
+header, saying when it would like to be asked again. With
+`honour_retry_after` set (the default), that value replaces the configured
+`poll_interval` for the next cycle only; the cycle after that goes back to
+`poll_interval` unless the eIM asks again.
+
+Only the answer that ends the exchange — "no eIM package available" — can carry
+one that means anything. A `Retry-After` on any other response is logged and
+dropped, because the IPAd is mid-exchange and about to contact the eIM again
+regardless, so there is no wait for the header to describe.
+
+How it travels: `store_header_cb()` in `src/ipa/http.c` records the value per
+response (parsing lives in `ipa_retry_after_from_header()`, in libipa, so it is
+unit-testable); `ipa_esipa_req()` parks it on the context; and
+`ipa_proc_eim_pkg_retr()` accepts it on the no-package path and rejects it
+everywhere else. `ipa_run()` reads the accepted value out before it frees the
+context, and the front-ends pick it up with
+`ipa_run_last_retry_after_seconds()` — the daemon in `ipad_android.c`, the APK
+through `NativeBridge.lastRetryAfterSeconds()`. Only the delta-seconds form is
+understood; an HTTP-date is refused rather than converted, since the feature is
+specified in seconds and a date would need a trusted clock the terminal may not
+have.
+
+Worth knowing before enabling it on an eIM that is not the one this was written
+for: honouring the header hands the poll cadence to the eIM, so a value it sends
+in error delays the next contact by exactly that long.
+
 **Build note:** jansson detection in `src/ipa/libipa/CMakeLists.txt` used to
 rely on `pkg-config` alone, so on a machine with `libjansson-dev` installed but
 no `pkg-config` binary the ESipa JSON binding was silently compiled out. A
@@ -307,12 +337,13 @@ loader now fails with a clear log line rather than starting on defaults.
 | `-1` | `one_euicc_pkg_only` | boolean |
 | `-R` | `refresh_flag` | boolean |
 | (none) | `esipa_binding` | `"asn1"` (default) or `"json"` |
+| (none) | `honour_retry_after` | boolean, **default true**. Obey a `Retry-After` header from the eIM; see below |
 | (new) | `poll_interval` | wait between poll cycles; `0` (default when absent) = run one cycle and stop. Must be `0` or ≥ 5 s; ceiling 24 h |
 | (new) | `poll_interval_unit` | `"seconds"` (default) or `"minutes"`. Stored as the operator wrote it, converted by `ipa_run_config_poll_seconds()` |
 | (new) | `log.path` | rotating-file sink (Phase 3) |
 | (new) | `log.max_size_bytes` | rotating-file sink; max 1 GiB |
 | (new) | `log.max_files` | rotating-file sink; max 1000 |
-| (new) | `-j PATH` | **CLI-only**: run from a JSON file. Takes over completely — the other flags are ignored, so there is never a second source of truth for the same setting. Lets the Linux build exercise the exact entry point the daemon and the APK use. |
+| (new) | `-J PATH` | **CLI-only**: run from a JSON file. Takes over completely — the other flags are ignored, so there is never a second source of truth for the same setting. Lets the Linux build exercise the exact entry point the daemon and the APK use. |
 
 ---
 

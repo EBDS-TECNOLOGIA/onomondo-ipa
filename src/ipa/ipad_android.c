@@ -172,8 +172,16 @@ int main(int argc, char **argv)
 		}
 
 		if (interval && !stop_requested) {
-			IPA_LOGP(SMAIN, LINFO, "next poll cycle in %lu s\n", interval);
-			interruptible_sleep((unsigned int) interval);
+			/* The eIM may have asked, on the response that ended this cycle, to be left
+			 * alone for a while; that applies to this wait only, and the configured
+			 * interval comes back for the cycle after.  ipa_run() already logged it. */
+			unsigned long wait = interval;
+			unsigned int retry_after = ipa_run_last_retry_after_seconds();
+
+			if (retry_after)
+				wait = retry_after;
+			IPA_LOGP(SMAIN, LINFO, "next poll cycle in %lu s\n", wait);
+			interruptible_sleep((unsigned int) wait);
 		}
 	} while (interval && !stop_requested);
 

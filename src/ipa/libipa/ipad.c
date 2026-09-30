@@ -305,6 +305,7 @@ struct ipa_context *ipa_new_ctx(struct ipa_config *cfg, struct ipa_buf *nvstate)
 	/* Not the zero value: IPA_MODE_IPAD is 0, and nothing has been established yet. The mode only
 	 * settles once TERMINAL CAPABILITY has told the eUICC which IPA the device supports. */
 	ctx->ipa_mode = IPA_MODE_UNKNOWN;
+	ctx->retry_after_pending = -1;
 	nvstate_deserialize(&ctx->nvstate, nvstate);
 
 	return ctx;
@@ -422,6 +423,14 @@ int ipa_add_init_eim_cfg(struct ipa_context *ctx, struct ipa_buf *cfg)
 	ipa_es10b_add_init_eim_res_free(add_init_eim_res);
 	ASN_STRUCT_FREE(asn_DEF_AddInitialEimRequest, eim_cfg_decoded);
 	return 0;
+}
+
+/*! Seconds the eIM asked for via Retry-After. See ipa_retry_after_seconds() in ipad.h. */
+unsigned int ipa_retry_after_seconds(const struct ipa_context *ctx)
+{
+	if (!ctx)
+		return 0;
+	return ctx->retry_after_accepted;
 }
 
 /*! reset memory of the eUICC (eUICCMemoryReset). See ipa_euicc_mem_rst() in ipad.h. */

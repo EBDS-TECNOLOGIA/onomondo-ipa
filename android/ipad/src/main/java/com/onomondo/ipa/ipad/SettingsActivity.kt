@@ -58,6 +58,7 @@ class SettingsActivity : Activity() {
     private lateinit var iotEmulation: CheckBox
     private lateinit var refreshFlag: CheckBox
     private lateinit var jsonBinding: CheckBox
+    private lateinit var honourRetryAfter: CheckBox
     private lateinit var pollInterval: EditText
     private lateinit var pollUnit: ToggleButton
 
@@ -85,6 +86,8 @@ class SettingsActivity : Activity() {
         iotEmulation.isChecked = config.optBoolean("iot_euicc_emu_enabled", false)
         refreshFlag.isChecked = config.optBoolean("refresh_flag", false)
         jsonBinding.isChecked = config.optString("esipa_binding", "asn1") == "json"
+        // Defaults to true, matching ipa_run_config_defaults() on the native side.
+        honourRetryAfter.isChecked = config.optBoolean("honour_retry_after", true)
 
         pollInterval.setText(
             config.optInt(ConfigStore.KEY_INTERVAL, ConfigStore.DEFAULT_INTERVAL).toString()
@@ -120,6 +123,7 @@ class SettingsActivity : Activity() {
         config.put("iot_euicc_emu_enabled", iotEmulation.isChecked)
         config.put("refresh_flag", refreshFlag.isChecked)
         config.put("esipa_binding", if (jsonBinding.isChecked) "json" else "asn1")
+        config.put("honour_retry_after", honourRetryAfter.isChecked)
 
         val log = config.optJSONObject("log") ?: JSONObject().also { config.put("log", it) }
         log.put("path", log.optString("path", store.logPath))
@@ -204,6 +208,7 @@ class SettingsActivity : Activity() {
         iotEmulation = col.check("Emulate IoT eUICC (consumer eUICC compatibility)")
         refreshFlag = col.check("Request UICC REFRESH on profile change")
         jsonBinding = col.check("Use JSON ESipa binding (default: ASN.1)")
+        honourRetryAfter = col.check("Honour Retry-After header")
 
         col.heading("Polling")
         pollInterval = col.field(

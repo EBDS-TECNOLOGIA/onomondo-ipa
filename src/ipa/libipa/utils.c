@@ -572,3 +572,55 @@ void *ipa_asn1c_dup(const struct asn_TYPE_descriptor_s *td, const void *struct_p
 	IPA_FREE(buf_encoded);
 	return struct_ptr_dup;
 }
+
+/*! Read a Retry-After value out of one raw HTTP header line. See ipa_retry_after_from_header() in utils.h. */
+bool ipa_retry_after_from_header(const char *line, size_t len, long *secs)
+{
+	static const char name[] = "retry-after:";
+	char val[32];
+	size_t i;
+	size_t n;
+	char *end;
+	long out;
+
+	if (!line || !secs)
+		return false;
+	if (len < sizeof(name)) /* "retry-after:" plus at least one byte of value */
+		return false;
+
+	/* Header names are case insensitive, RFC 9110 section 5.1. */
+	for (i = 0; i < sizeof(name) - 1; i++) {
+		if (tolower((unsigned char)line[i]) != name[i])
+			return false;
+	}
+
+	/* Optional whitespace after the colon, RFC 9110 section 5.5. */
+	while (i < len && (line[i] == ' ' || line[i] == '\t'))
+		i++;
+
+	/* Copy out so the value is NUL terminated for strtol(); a value that cannot fit is not a
+	 * delta-seconds we could use anyway. */
+	n = len - i;
+	if (n == 0 || n >= sizeof(val))
+		return false;
+	memcpy(val, line + i, n);
+	val[n] = '\0';
+
+	errno = 0;
+	out = strtol(val, &end, 10);
+	if (errno != 0 || end == val)
+		return false;
+
+	/* Only trailing line ending and whitespace may follow the digits; anything else means this is not a
+	 * bare delta-seconds (an HTTP-date, most likely) and is left alone. */
+	while (*end == '\r' || *end == '\n' || *end == ' ' || *end == '\t')
+		end++;
+	if (*end != '\0')
+		return false;
+
+	if (out < 0)
+		return false;
+
+	*secs = out;
+	return true;
+}

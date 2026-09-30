@@ -194,6 +194,20 @@ struct ipa_config {
 	 *  build without it makes ipa_init() fail with -EINVAL rather than silently ignore the request. */
 	bool iot_euicc_emu_enabled;
 
+	/*! Obey the `Retry-After` response header when the eIM sends one (JSON: honour_retry_after).
+	 *
+	 *  Not an SGP.32 mechanism: some eIM deployments answer a getPackage that has nothing pending with a
+	 *  `Retry-After: <seconds>` header, saying when they would like to be asked again. With this set, that
+	 *  value replaces the front-end's configured poll interval for the next cycle only, and is readable with
+	 *  ipa_retry_after_seconds(). The header is honoured only on the "no eIM package available" answer, which
+	 *  is the end of the exchange; one arriving mid-exchange is logged and ignored, because the IPAd is going
+	 *  to come straight back to the eIM anyway.
+	 *
+	 *  ON by default. Clear it to ignore the header entirely, which is the behaviour of an eIM that does not
+	 *  send it in the first place. Note that honouring it lets the eIM set the poll cadence, so a value it
+	 *  sends in error delays the next contact by however long it said. */
+	bool honour_retry_after;
+
 	/*! Consent to the Profile Policy Rules of a profile about to be installed.
 	 *  This is asked only for the rules the RAT of the eUICC marks as requiring end user consent, and it is a
 	 *  separate question from prfle_inst_consent_cb below, which is about the download as such.
@@ -245,6 +259,13 @@ enum ipa_euicc_mem_rst_opt {
  *  \param[in] options bitmask of enum ipa_euicc_mem_rst_opt; nothing is deleted when it is 0.
  *  \returns 0 on success, negative on error. */
 int ipa_euicc_mem_rst(struct ipa_context *ctx, uint32_t options);
+/*! Seconds the eIM asked the IPAd to wait before the next getPackage, from a `Retry-After` header on the
+ *  "no eIM package available" response (see ipa_config.honour_retry_after).
+ *  \param[in] ctx pointer to ipa_context.
+ *  \returns the requested delay in seconds, or 0 when the eIM did not ask for one -- in which case the
+ *           front-end's own poll interval applies. */
+unsigned int ipa_retry_after_seconds(const struct ipa_context *ctx);
+
 int ipa_poll(struct ipa_context *ctx);
 void ipa_close(struct ipa_context *ctx);
 struct ipa_buf *ipa_free_ctx(struct ipa_context *ctx);

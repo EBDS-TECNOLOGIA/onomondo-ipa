@@ -54,6 +54,9 @@ class ConfigStore(context: Context) {
         put("nvstate_path", nvstatePath)
         put("esipa_req_retries", DEFAULT_RETRIES)
         put("esipa_binding", "asn1")
+        // Let the eIM steer the next poll with a Retry-After header; see
+        // ipa_config.honour_retry_after. Matches the native default.
+        put("honour_retry_after", true)
         put("iot_euicc_emu_enabled", false)
         put("refresh_flag", false)
         // 0 = one poll cycle per Start, which is what the IPAd did before the

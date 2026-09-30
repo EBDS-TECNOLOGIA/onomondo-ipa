@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <string.h>
+#include <ctype.h>
 #include <curl/curl.h>
 /* OpenSSL is used to install the eUICC-provisioned TLS trust anchor into the
  * SSL_CTX before each handshake via CURLOPT_SSL_CTX_FUNCTION. */
@@ -52,6 +53,9 @@ struct http_ctx {
 	char *ca_pem;          /* PEM text of CA cert (trustedCertificateTls) */
 	size_t ca_pem_len;
 	EVP_PKEY *ca_pk;       /* trust-anchor public key (trustedEimPkTls) */
+	/* `Retry-After` of the most recent response, in seconds; -1 when absent.
+	 * Reset before each request, see store_header_cb(). */
+	long retry_after_s;
 };
 
 /* -------------------------------------------------------------------------
@@ -216,6 +220,7 @@ void *ipa_http_init(const char *cabundle, bool no_verif)
 	ctx->no_verif = no_verif;
 	ctx->connect_timeout_s = IPA_HTTP_CONNECT_TIMEOUT_S;
 	ctx->total_timeout_s = IPA_HTTP_TOTAL_TIMEOUT_S;
+	ctx->retry_after_s = -1;
 	ctx->have_openssl_backend = curl_has_openssl_backend();
 
 	if (!ctx->have_openssl_backend) {
@@ -350,6 +355,33 @@ static size_t store_response_cb(void *ptr, size_t size, size_t nmemb, void *clie
 	buf->len += size * nmemb;
 
 	return size * nmemb;
+}
+
+/* Callback function to pick the headers we care about out of the response.
+ * libcurl hands one header line per call, including the status line and the
+ * final empty line, and the line still carries its CRLF.  The parsing itself
+ * lives in libipa so it can be unit tested, see ipa_retry_after_from_header(). */
+static size_t store_header_cb(void *ptr, size_t size, size_t nmemb, void *clientp)
+{
+	struct http_ctx *ctx = clientp;
+	size_t len = size * nmemb;
+	long secs;
+
+	if (ipa_retry_after_from_header(ptr, len, &secs)) {
+		ctx->retry_after_s = secs;
+		IPA_LOGP(SHTTP, LDEBUG, "response carried Retry-After: %ld seconds\n", secs);
+	}
+
+	return len;
+}
+
+long ipa_http_get_retry_after(void *http_ctx)
+{
+	struct http_ctx *ctx = http_ctx;
+
+	if (!ctx)
+		return -1;
+	return ctx->retry_after_s;
 }
 
 /*! Open a TCP connection (if not already present) and Perform HTTP request.
@@ -495,6 +527,19 @@ struct ipa_buf *ipa_http_req_with_ct(void *http_ctx, const struct ipa_buf *req,
 		goto error;
 	}
 	rc = curl_easy_setopt(ctx->curl, CURLOPT_WRITEDATA, (void *)&res);
+	if (rc != CURLE_OK) {
+		IPA_LOGP(SHTTP, LERROR, "internal HTTP-client failure: %s\n", curl_easy_strerror(rc));
+		goto error;
+	}
+	/* Reset before the transfer, so the value always belongs to the response
+	 * we are about to receive rather than to an earlier one. */
+	ctx->retry_after_s = -1;
+	rc = curl_easy_setopt(ctx->curl, CURLOPT_HEADERFUNCTION, store_header_cb);
+	if (rc != CURLE_OK) {
+		IPA_LOGP(SHTTP, LERROR, "internal HTTP-client failure: %s\n", curl_easy_strerror(rc));
+		goto error;
+	}
+	rc = curl_easy_setopt(ctx->curl, CURLOPT_HEADERDATA, (void *)ctx);
 	if (rc != CURLE_OK) {
 		IPA_LOGP(SHTTP, LERROR, "internal HTTP-client failure: %s\n", curl_easy_strerror(rc));
 		goto error;

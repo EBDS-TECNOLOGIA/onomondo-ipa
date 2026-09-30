@@ -236,3 +236,19 @@ static inline void ipa_buf_free(struct ipa_buf *buf)
 }
 
 size_t ipa_binary_from_hexstr(uint8_t *binary, size_t binary_len, const char *hexstr);
+
+/*! Read a `Retry-After` value out of one raw HTTP response header line.
+ *
+ *  Lives here rather than in the HTTP client so it can be tested on its own: the client gets the line from
+ *  libcurl, unterminated and still carrying its CRLF, which is awkward to reproduce.
+ *
+ *  Only the delta-seconds form of RFC 9110 section 10.2.3 is accepted. An HTTP-date is rejected rather than
+ *  converted, because the eIM feature this serves is specified in seconds and a date would need a trusted
+ *  clock the device may not have.
+ *
+ *  \param[in] line one header line, "Name: value", case insensitive, not necessarily NUL terminated and
+ *             possibly ending in CR and/or LF.
+ *  \param[in] len length of line in bytes.
+ *  \param[out] secs the value, on success only.
+ *  \returns true when the line is a Retry-After carrying a non-negative delta-seconds value. */
+bool ipa_retry_after_from_header(const char *line, size_t len, long *secs);

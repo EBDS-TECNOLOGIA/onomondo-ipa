@@ -56,6 +56,9 @@ void ipa_run_config_defaults(struct ipa_run_config *rcfg)
 	rcfg->cfg.euicc_channel = IPA_DEFAULT_CHANNEL_NUMBER;
 	rcfg->cfg.esipa_req_retries = IPA_DEFAULT_ESIPA_REQ_RETRIES;
 	rcfg->cfg.esipa_binding = IPA_ESIPA_BINDING_ASN1;
+	/* On by default: an eIM that does not send the header is unaffected, and one that
+	 * does is asking for a cadence it has a reason to want.  See ipa_config.honour_retry_after. */
+	rcfg->cfg.honour_retry_after = true;
 	rcfg->poll_interval = IPA_DEFAULT_POLL_INTERVAL;
 	rcfg->poll_interval_unit = IPA_POLL_INTERVAL_SECONDS;
 	ipa_binary_from_hexstr(rcfg->cfg.tac, sizeof(rcfg->cfg.tac), IPA_DEFAULT_TAC);
@@ -120,6 +123,7 @@ static const char *const known_keys[] = {
 	"iot_euicc_emu_enabled",/* -E */
 	"one_euicc_pkg_only",	/* -1 */
 	"refresh_flag",		/* -R */
+	"honour_retry_after",	/* (no flag; obey the eIM's Retry-After header, on by default) */
 	"esipa_binding",	/* (no flag; ASN.1 by default) */
 	"poll_interval",	/* (no flag; front-end scheduling, 0 = single run) */
 	"poll_interval_unit",	/* (no flag; "seconds" or "minutes") */
@@ -398,6 +402,8 @@ struct ipa_run_config *ipa_config_json_parse(const char *json, size_t json_len)
 	if (get_bool(obj, "", "eim_disable_ssl_verif", &rcfg->cfg.eim_disable_ssl_verif) < 0)
 		goto err;
 	if (get_bool(obj, "", "iot_euicc_emu_enabled", &rcfg->cfg.iot_euicc_emu_enabled) < 0)
+		goto err;
+	if (get_bool(obj, "", "honour_retry_after", &rcfg->cfg.honour_retry_after) < 0)
 		goto err;
 	if (get_bool(obj, "", "refresh_flag", &rcfg->cfg.refresh_flag) < 0)
 		goto err;

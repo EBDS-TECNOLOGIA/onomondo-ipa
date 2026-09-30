@@ -23,6 +23,21 @@ struct ipa_buf *ipa_http_req(void *http_ctx, const struct ipa_buf *req, const ch
 struct ipa_buf *ipa_http_req_with_ct(void *http_ctx, const struct ipa_buf *req,
 				     const char *url, const char *content_type);
 void ipa_http_close(void *http_ctx);
+
+/* Value of the `Retry-After` response header of the most recent request, in
+ * seconds, or -1 when the last response carried no such header (or one this
+ * client could not read).  Reset at the start of every request, so it always
+ * describes the response just received.
+ *
+ * Not part of SGP.32: some eIM deployments use it to steer when the IPAd should
+ * come back for the next getPackage.  The HTTP client only reports it; whether
+ * it is obeyed is decided further up, see ipa_config.honour_retry_after.
+ *
+ * Only the delta-seconds form of RFC 9110 section 10.2.3 is understood; an
+ * HTTP-date is reported as absent, because the eIM feature this serves is
+ * specified in seconds and a date would need a trusted clock the device may
+ * not have. */
+long ipa_http_get_retry_after(void *http_ctx);
 void ipa_http_free(void *http_ctx);
 
 /* Override the connect-phase and whole-request timeouts (seconds); a value

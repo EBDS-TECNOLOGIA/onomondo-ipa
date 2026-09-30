@@ -203,6 +203,33 @@ error:
 /*! Perform eIM Package Retrieval Procedure.
  *  \param[inout] ctx pointer to ipa_context.
  *  \returns 0 on success, negative on failure. */
+/* Act on a `Retry-After` that ipa_esipa_req() parked on the context for this
+ * GetEimPackage response, now that it is known how the response turned out.
+ * Called on the "no eIM package available" path only; every other outcome means
+ * the IPAd carries on talking to the eIM, so reject_retry_after() applies. */
+static void accept_retry_after(struct ipa_context *ctx)
+{
+	if (ctx->retry_after_pending < 0)
+		return;
+
+	ctx->retry_after_accepted = (unsigned int)ctx->retry_after_pending;
+	ctx->retry_after_pending = -1;
+	IPA_LOGP(SIPA, LINFO, "Retry-After received, next poll in %u seconds\n", ctx->retry_after_accepted);
+}
+
+/* A GetEimPackage that did have something pending, or failed: the IPAd is not
+ * finished with the eIM, so the header has nothing to schedule. */
+static void reject_retry_after(struct ipa_context *ctx)
+{
+	if (ctx->retry_after_pending < 0)
+		return;
+
+	IPA_LOGP(SIPA, LERROR,
+		 "Retry-After received (%d seconds), it will be ignored because this is not the last step of the exchange\n",
+		 ctx->retry_after_pending);
+	ctx->retry_after_pending = -1;
+}
+
 int ipa_proc_eim_pkg_retr(struct ipa_context *ctx)
 {
 	struct ipa_esipa_get_eim_pkg_res *get_eim_pkg_res = NULL;
@@ -217,6 +244,10 @@ int ipa_proc_eim_pkg_retr(struct ipa_context *ctx)
 		rc = -EINVAL;
 		goto error;
 	} else if (get_eim_pkg_res->eim_pkg_err == GetEimPackageResponse__eimPackageError_noEimPackageAvailable) {
+		/* The exchange ends here, so a Retry-After on this response is the one
+		 * the eIM can actually be granted: nothing follows that would override
+		 * it, and the front-end is about to decide when to come back. */
+		accept_retry_after(ctx);
 		rc = -GetEimPackageResponse__eimPackageError_noEimPackageAvailable;
 		goto error;
 	} else if (get_eim_pkg_res->eim_pkg_err) {
@@ -224,12 +255,19 @@ int ipa_proc_eim_pkg_retr(struct ipa_context *ctx)
 		goto error;
 	}
 
+	/* Something is pending, so the IPAd is staying in the exchange. */
+	reject_retry_after(ctx);
+
 	IPA_LOGP(SIPA, LINFO, "eIM Package Retrieval succeeded!\n");
 	rc = eim_pkg_exec(ctx, get_eim_pkg_res);
 	ipa_esipa_get_eim_pkg_free(get_eim_pkg_res);
 	ipa_esipa_close(ctx);
 	return rc;
 error:
+	/* A no-op when the value was just accepted above; it only bites on the
+	 * failure paths, where the eIM asked for a delay on a response that does
+	 * not end the exchange. */
+	reject_retry_after(ctx);
 	ipa_esipa_get_eim_pkg_free(get_eim_pkg_res);
 	IPA_LOGP(SIPA, LINFO, "eIM Package Retrieval failed!\n");
 	ipa_esipa_close(ctx);

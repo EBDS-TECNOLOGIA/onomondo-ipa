@@ -182,6 +182,15 @@ int ipa_run(struct ipa_run_config *rcfg);
  *  \returns 0 on success, negative on error. */
 int ipa_run_from_config(const char *json_path);
 
+/*! Seconds the eIM asked for with a `Retry-After` header on the last completed ipa_run() /
+ *  ipa_run_from_config(), or 0 when it asked for nothing.
+ *
+ *  A front-end that repeats poll cycles on an interval should prefer this value over its configured
+ *  interval for the next cycle only; the following cycle goes back to the configured interval unless the
+ *  eIM asks again.  Always 0 when ipa_config.honour_retry_after is false.  Reset when a run starts, so it
+ *  never describes an older cycle. */
+unsigned int ipa_run_last_retry_after_seconds(void);
+
 /*! Ask a running ipa_run() / ipa_run_from_config() to leave the poll loop at
  *  the next opportunity.  Async-signal-safe, so it may be called from a
  *  signal handler (the CLI wires it to SIGUSR1) or from another thread. */

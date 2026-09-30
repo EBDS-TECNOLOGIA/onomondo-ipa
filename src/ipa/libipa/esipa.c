@@ -163,6 +163,38 @@ struct ipa_buf *ipa_esipa_msg_to_eim_enc(const struct EsipaMessageFromIpaToEim *
  * Callers that must stay responsive should set esipa_req_retries to 0 and drive
  * retries from their own poll cadence.  Making the backoff itself non-blocking
  * would require threading the wait through the poll state machine. */
+/* Take note of a `Retry-After` header on the response we just received (see
+ * ipa_config.honour_retry_after).
+ *
+ * Only a GetEimPackage response can carry one that means anything, and even
+ * there only when it turns out to be the "no package available" answer -- the
+ * end of the exchange.  That is not knowable here, so the value is parked on
+ * the context and ipa_proc_eim_pkg_retr() decides.  On any other function the
+ * IPAd is mid-exchange and about to talk to the eIM again regardless, so the
+ * header cannot be acted on and is reported here and dropped. */
+static void note_retry_after(struct ipa_context *ctx, const char *function_name)
+{
+	long secs;
+
+	ctx->retry_after_pending = -1;
+
+	if (!ctx->cfg->honour_retry_after)
+		return;
+
+	secs = ipa_http_get_retry_after(ctx->http_ctx);
+	if (secs < 0)
+		return;
+
+	if (strcmp(function_name, "GetEimPackage") != 0) {
+		IPA_LOGP_ESIPA(function_name, LERROR,
+			       "Retry-After received (%ld seconds), it will be ignored because this is not the last step of the exchange\n",
+			       secs);
+		return;
+	}
+
+	ctx->retry_after_pending = (int)secs;
+}
+
 struct ipa_buf *ipa_esipa_req(struct ipa_context *ctx, const struct ipa_buf *esipa_req, const char *function_name)
 {
 	struct ipa_buf *esipa_res;
@@ -198,6 +230,7 @@ struct ipa_buf *ipa_esipa_req(struct ipa_context *ctx, const struct ipa_buf *esi
 			/* Successful request */
 			IPA_LOGP_ESIPA(function_name, LDEBUG, "received %zu bytes from eIM (buffer size: %zu bytes)\n",
 				       esipa_res->len, esipa_res->data_len);
+			note_retry_after(ctx, function_name);
 			break;
 		}
 	}
